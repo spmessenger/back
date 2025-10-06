@@ -1,3 +1,4 @@
+from core.entities.chat import ChatType
 from tests.conftest import client, TestClient
 
 
@@ -8,7 +9,7 @@ def test_register(client: TestClient):
     resp_json = response.json()
     assert resp_json['auth']['access_token']
     assert resp_json['chats'][0]['id']
-    assert resp_json['chats'][0]['type'] == 'private'
+    assert resp_json['chats'][0]['type'] == ChatType.PRIVATE
 
 
 def test_login(client: TestClient):

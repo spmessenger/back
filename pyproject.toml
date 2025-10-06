@@ -18,8 +18,15 @@ build-backend = "poetry.core.masonry.api"
 fastapi = "^0.117.1"
 uvicorn = "^0.37.0"
 core = { git = "https://gitlab.com/messenger910539/core.git", branch = "main" }
+mypy = "^1.18.2"
+httpx = "^0.28.1"
 
 
 [tool.poetry.scripts]
 start = "back.start:main"
 dev = "back.start:dev"
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-s -v"

@@ -20,6 +20,7 @@ uvicorn = "^0.37.0"
 core = { git = "https://gitlab.com/messenger910539/core.git", branch = "main" }
 mypy = "^1.18.2"
 httpx = "^0.28.1"
+python-dotenv = "^1.1.1"
 
 
 [tool.poetry.scripts]

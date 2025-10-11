@@ -3,31 +3,42 @@ name = "back"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Your Name",email = "you@example.com"}
+    {name = "Your Name", email = "you@example.com"}
 ]
 readme = "README.md"
-requires-python = "3.11"
-
+requires-python = "^3.11"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-
 [tool.poetry.dependencies]
+python = "^3.11"
 fastapi = "^0.117.1"
 uvicorn = "^0.37.0"
 core = { git = "https://gitlab.com/messenger910539/core.git", branch = "main" }
 mypy = "^1.18.2"
 httpx = "^0.28.1"
-python-dotenv = "^1.1.1"
 
+pytest = "^8.4.2"
+pytest-env = "^1.2.0"
+pytest-asyncio = "^1.2.0"
+python-dotenv = "1.1.1"
+
+[tool.poetry.group.test.dependencies]
+pytest = "^8.4.2"
+pytest-env = "^1.2.0"
+pytest-asyncio = "^1.2.0"
 
 [tool.poetry.scripts]
 start = "back.start:main"
 dev = "back.start:dev"
 
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-s -v"
+env = [
+    "DB_TYPE=postgresql",
+    "DB_NAME=test",
+]
+asyncio_mode = "auto"

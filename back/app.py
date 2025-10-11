@@ -1,8 +1,23 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from db.session import ping_connection
+from db.settings import settings, DatabaseTypeEnum
+from db.misc.tables import create_tables, drop_tables
 from .router import base_router
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:
+        create_tables()
+    ping_connection()
+    print(settings.DB_TYPE)
+    yield
+    if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:
+        drop_tables()
+
+app = FastAPI(lifespan=lifespan)
 
 
 app.add_middleware(

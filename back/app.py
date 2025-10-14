@@ -12,7 +12,6 @@ async def lifespan(app: FastAPI):
     if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:
         create_tables()
     ping_connection()
-    print(settings.DB_TYPE)
     yield
     if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:
         drop_tables()

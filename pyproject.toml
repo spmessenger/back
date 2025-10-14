@@ -33,6 +33,7 @@ pytest-asyncio = "^1.2.0"
 [tool.poetry.scripts]
 start = "back.start:main"
 dev = "back.start:dev"
+init_postgres = "back.scripts:init_tables"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

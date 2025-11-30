@@ -24,6 +24,7 @@ pytest = "^8.4.2"
 pytest-env = "^1.2.0"
 pytest-asyncio = "^1.2.0"
 python-dotenv = "1.1.1"
+pre-commit = "^4.5.0"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.4.2"
@@ -43,3 +44,11 @@ env = [
     "DB_NAME=test",
 ]
 asyncio_mode = "auto"
+
+[[tool.mypy.overrides]]
+module = "db.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "core.*"
+ignore_missing_imports = true

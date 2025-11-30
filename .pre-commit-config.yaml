@@ -1,0 +1,10 @@
+repos:
+-   repo: local
+    hooks:
+    -   id: mypy
+        name: mypy
+        description: Static type checker
+        language: system
+        types: [python]
+        entry: mypy
+        args: [.]

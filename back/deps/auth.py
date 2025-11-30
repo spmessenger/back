@@ -1,6 +1,6 @@
 from typing import Annotated
 from fastapi import Depends, HTTPException, status, Cookie
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 from core.repos.user import User
 from core.misc.auth.jwt import JWTTokenManager
 from .repos.user import UserRepoDep
@@ -14,6 +14,11 @@ async def aget_current_user(
     secret_key: SecretKeyDep,
     access_token: str | None = Cookie(None),
 ) -> User:
+    if access_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Access token is missing'
+        )
     token_manager = JWTTokenManager(secret_key)
     payload = token_manager.verify_token(access_token)
     if not payload:
@@ -28,8 +33,13 @@ async def aget_current_user(
 def get_current_user(
     repo: UserRepoDep,
     secret_key: SecretKeyDep,
-    access_token: str = Cookie(),
+    access_token: str | None = Cookie(None),
 ) -> User:
+    if access_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Access token is missing'
+        )
     token_manager = JWTTokenManager(secret_key)
     payload = token_manager.verify_token(access_token)
     if not payload:

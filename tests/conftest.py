@@ -1,4 +1,3 @@
-import types
 import pytest
 from jose import jwt
 from fastapi.testclient import TestClient
@@ -9,10 +8,9 @@ from db.misc.tables import create_tables, drop_tables
 
 class AuthTestClient(TestClient):
     def get_user_id(self):
-        authorization = self.headers.get('Authorization')
-        if not authorization:
-            raise ValueError('Authorization header not found')
-        token = authorization.split(' ')[1]
+        token = self.cookies.get('access_token')
+        if not token:
+            raise ValueError('access_token cookie not found')
         payload = jwt.decode(token, key='', options={'verify_signature': False})
         return payload['id']
 
@@ -33,8 +31,7 @@ def client():
 def auth_client(client: TestClient):
     resp = client.post('/api/register', json={'username': 'test', 'password': 'test'})
     resp_json = resp.json()
-    headers = {'Authorization': f'Bearer {resp_json["auth"]["access_token"]}'}
-    client = AuthTestClient(app, headers=headers)
+    client = AuthTestClient(app, cookies={'access_token': resp_json['auth']['access_token']})
     return client
 
 

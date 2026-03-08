@@ -1,5 +1,5 @@
-from typing import Annotated
+from typing import Annotated, TypeAlias
 from fastapi import Depends
 from core.repos.message import AbstractMessageRepo, DbMessageRepo
 
-MessageRepoDep = Annotated[AbstractMessageRepo, Depends(DbMessageRepo)]
+MessageRepoDep: TypeAlias = Annotated[AbstractMessageRepo, Depends(DbMessageRepo)]

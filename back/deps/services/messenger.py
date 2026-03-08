@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, TypeAlias
 from fastapi import Depends
 from core.services.messenger import MessengerService
 from ..repos import ChatRepoDep, ParticipantRepoDep, MessageRepoDep, UserRepoDep
@@ -9,4 +9,4 @@ def get_messenger_service(chat_repo: ChatRepoDep, participant_repo: ParticipantR
     return MessengerService(chat_repo, participant_repo, message_repo, user_repo)
 
 
-MessengerServiceDep = Annotated[MessengerService, Depends(get_messenger_service)]
+MessengerServiceDep: TypeAlias = Annotated[MessengerService, Depends(get_messenger_service)]

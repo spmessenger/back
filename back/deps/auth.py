@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, TypeAlias
 from fastapi import Depends, HTTPException, status, Cookie
 from fastapi.security import HTTPBearer
 from core.repos.user import User
@@ -52,4 +52,4 @@ def get_current_user(
     return repo.get_by_id(payload['id'])
 
 
-AuthUserDep = Annotated[User, Depends(get_current_user)]
+AuthUserDep: TypeAlias = Annotated[User, Depends(get_current_user)]

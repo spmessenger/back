@@ -1,5 +1,5 @@
-from typing import Annotated
+from typing import Annotated, TypeAlias
 from fastapi import Depends
 from core.repos.participant import AbstractParticipantRepo, DbParticipantRepo
 
-ParticipantRepoDep = Annotated[AbstractParticipantRepo, Depends(DbParticipantRepo)]
+ParticipantRepoDep: TypeAlias = Annotated[AbstractParticipantRepo, Depends(DbParticipantRepo)]

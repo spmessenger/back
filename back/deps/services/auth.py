@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, TypeAlias
 from fastapi import Depends
 from core.services.auth import AuthService
 from ..repos import UserRepoDep
@@ -9,4 +9,4 @@ def get_auth_service(user_repo: UserRepoDep, messenger: MessengerServiceDep) -> 
     return AuthService(user_repo, messenger)
 
 
-AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
+AuthServiceDep: TypeAlias = Annotated[AuthService, Depends(get_auth_service)]

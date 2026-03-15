@@ -12,7 +12,8 @@ async def lifespan(app: FastAPI):
     if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:
         create_tables()
     if not ping_connection():
-        raise RuntimeError('Database connection failed during application startup')
+        raise RuntimeError(
+            'Database connection failed during application startup')
     ensure_tables_exist()
     yield
     if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:

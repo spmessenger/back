@@ -19,6 +19,8 @@ uvicorn = "^0.37.0"
 core = { git = "https://github.com/spmessenger/core.git", branch = "main" }
 mypy = "^1.18.2"
 httpx = "^0.28.1"
+boto3 = "^1.40.59"
+pillow = "^11.3.0"
 
 pytest = "^8.4.2"
 pytest-env = "^1.2.0"

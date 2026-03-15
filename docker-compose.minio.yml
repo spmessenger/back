@@ -1,0 +1,29 @@
+services:
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: messenger-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done &&
+      mc mb --ignore-existing local/spmessenger &&
+      mc anonymous set public local/spmessenger
+      "
+
+volumes:
+  minio-data:

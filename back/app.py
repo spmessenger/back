@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from db.session import ping_connection
 from db.settings import settings, DatabaseTypeEnum
-from db.misc.tables import create_tables, drop_tables
+from db.misc import create_tables, drop_tables, ensure_tables_exist
 from .router import base_router
 
 
@@ -11,7 +11,9 @@ from .router import base_router
 async def lifespan(app: FastAPI):
     if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:
         create_tables()
-    ping_connection()
+    if not ping_connection():
+        raise RuntimeError('Database connection failed during application startup')
+    ensure_tables_exist()
     yield
     if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:
         drop_tables()

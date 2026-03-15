@@ -1,3 +1,4 @@
+from __future__ import annotations
 from fastapi import APIRouter, Body
 from core.entities.chat import Chat
 from back.deps.auth import AuthUserDep
@@ -33,5 +34,6 @@ async def create_group(
     title: str = Body(),
     participants: list[int] = Body(),
 ) -> ChatCreation:
-    chat, participants = messenger.create_group_chat(user.id, title, participants)
+    chat, participants = messenger.create_group_chat(
+        user.id, title, participants)
     return ChatCreation(chat=chat, participants=participants)

@@ -1,10 +1,20 @@
-from datetime import datetime, timezone
 from typing import Annotated
 from fastapi import APIRouter, Body, Cookie, HTTPException, Response
+from pydantic import BaseModel
 from back.deps.services.auth import AuthServiceDep
+from back.deps.auth import AuthUserDep
 from back.misc.utils import set_access_token_cookie, set_refresh_token_cookie
 
 router = APIRouter()
+
+
+class ProfileResponse(BaseModel):
+    id: int
+    username: str
+
+
+class ProfileUpdateRequest(BaseModel):
+    username: str
 
 
 @router.post('/login')
@@ -53,3 +63,31 @@ async def refresh(
     set_access_token_cookie(response, auth)
     set_refresh_token_cookie(response, auth)
     return {'auth': auth}
+
+
+@router.get('/profile')
+def get_profile(user: AuthUserDep) -> ProfileResponse:
+    return ProfileResponse(id=user.id, username=user.username)
+
+
+@router.patch('/profile')
+def update_profile(
+    payload: ProfileUpdateRequest,
+    user: AuthUserDep,
+    service: AuthServiceDep,
+) -> ProfileResponse:
+    try:
+        updated_user = service.update_profile(user.id, payload.username)
+    except ValueError as e:
+        message = str(e)
+        if message == 'Username cannot be empty':
+            raise HTTPException(
+                status_code=400,
+                detail={'ru': 'Имя пользователя не может быть пустым', 'en': message},
+            ) from e
+        raise HTTPException(
+            status_code=400,
+            detail={'ru': 'Пользователь с таким именем уже существует', 'en': message},
+        ) from e
+
+    return ProfileResponse(id=updated_user.id, username=updated_user.username)

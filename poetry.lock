@@ -389,10 +389,10 @@ optional = false
 python-versions = "^3.11"
 groups = ["main"]
 files = []
-develop = false
+develop = true
 
 [package.dependencies]
-db = {git = "https://github.com/spmessenger/db.git", branch = "main"}
+db = {path = "../db", develop = true}
 multipledispatch = "^1.0.0"
 mypy = "^1.18.2"
 passlib = {version = "^1.7.4", extras = ["bcrypt"]}
@@ -405,10 +405,8 @@ types-passlib = "^1.7.7.20250602"
 types-python-jose = "^3.5.0.20250531"
 
 [package.source]
-type = "git"
-url = "https://github.com/spmessenger/core.git"
-reference = "main"
-resolved_reference = "11225a2312e1cc4b028320d635094c37e5ff0958"
+type = "directory"
+url = "../core"
 
 [[package]]
 name = "cryptography"
@@ -490,7 +488,7 @@ optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = []
-develop = false
+develop = true
 
 [package.dependencies]
 aiosqlite = ">=0.21.0,<0.22.0"
@@ -501,10 +499,8 @@ pydantic-settings = ">=2.11.0,<3.0.0"
 sqlalchemy = {version = ">=2.0.43,<3.0.0", extras = ["asyncio"]}
 
 [package.source]
-type = "git"
-url = "https://github.com/spmessenger/db.git"
-reference = "main"
-resolved_reference = "cfec375a55daaf1bd1adc00a594130769970fcbc"
+type = "directory"
+url = "../db"
 
 [[package]]
 name = "distlib"
@@ -1930,4 +1926,4 @@ python-discovery = ">=1"
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "4949330f8eaeecee2f324b92641fe67eaaf92e8852d7e524a14e2204fdb45b92"
+content-hash = "7b05860dae121b1030ae1fb39ecf5459e5b75ccdc7aee754934c8abf95fb8278"

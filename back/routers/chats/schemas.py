@@ -1,5 +1,7 @@
 from pydantic import BaseModel
+from pydantic import model_validator
 from core.entities import Chat, Participant
+from typing import Literal
 
 
 class ChatCreation(BaseModel):
@@ -36,3 +38,16 @@ class ChatMessageResponse(BaseModel):
     content: str
     created_at_timestamp: float
     is_own: bool
+
+
+class WsChatActionRequest(BaseModel):
+    action: Literal['get_messages', 'send_message']
+    chat_id: int
+    content: str | None = None
+    client_message_id: str | None = None
+
+    @model_validator(mode='after')
+    def validate_content_for_send(self) -> 'WsChatActionRequest':
+        if self.action == 'send_message' and not self.content:
+            raise ValueError('content is required for send_message action')
+        return self

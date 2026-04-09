@@ -1,12 +1,13 @@
 from __future__ import annotations
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 from core.entities.chat import Chat
-from back.deps.auth import AuthUserDep
+from back.deps.auth import AuthUserDep, get_current_user_by_token
+from back.deps.settings import SecretKeyDep
 from back.deps.repos.chat import ChatRepoDep
-from back.deps.repos.message import MessageRepoDep
-from back.deps.repos.participant import ParticipantRepoDep
 from back.deps.repos.user import UserRepoDep
 from back.deps.services.messenger import MessengerServiceDep
+from back.services.ws_manager import WebSocketConnectionManager
 from back.deps.services.storage import StorageServiceDep
 from .schemas import (
     AvailableUser,
@@ -14,6 +15,7 @@ from .schemas import (
     ChatMessageResponse,
     GroupCreationRequest,
     SendMessageRequest,
+    WsChatActionRequest,
 )
 
 router = APIRouter(tags=['Chats'])
@@ -86,11 +88,9 @@ async def create_group(
 async def get_chat_messages(
     chat_id: int,
     user: AuthUserDep,
-    participant_repo: ParticipantRepoDep,
-    message_repo: MessageRepoDep,
+    messenger: MessengerServiceDep,
 ) -> list[ChatMessageResponse]:
-    participant = participant_repo.get_one(chat_id=chat_id, user_id=user.id)
-    messages = message_repo.find_all(chat_id=chat_id)
+    participant, messages = messenger.get_chat_messages(chat_id=chat_id, user_id=user.id)
     return [_serialize_message(message, participant.id) for message in messages]
 
 
@@ -99,9 +99,113 @@ async def send_chat_message(
     chat_id: int,
     user: AuthUserDep,
     messenger: MessengerServiceDep,
-    participant_repo: ParticipantRepoDep,
     payload: SendMessageRequest = Body(),
 ) -> ChatMessageResponse:
-    participant = participant_repo.get_one(chat_id=chat_id, user_id=user.id)
+    participant = messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
     message = messenger.send_message(chat_id, user.id, payload.content)
     return _serialize_message(message, participant.id)
+
+
+@router.websocket('/ws/chats')
+async def chats_socket(
+    websocket: WebSocket,
+    user_repo: UserRepoDep,
+    secret_key: SecretKeyDep,
+    messenger: MessengerServiceDep,
+):
+    access_token = websocket.cookies.get('access_token')
+    try:
+        user = get_current_user_by_token(
+            repo=user_repo,
+            secret_key=secret_key,
+            access_token=access_token,
+        )
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    ws_manager: WebSocketConnectionManager = websocket.app.state.ws_manager
+    await ws_manager.connect(user_id=user.id, websocket=websocket)
+
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            try:
+                request = WsChatActionRequest.model_validate(payload)
+            except ValidationError as validation_error:
+                await websocket.send_json(
+                    {
+                        'type': 'error',
+                        'detail': str(validation_error),
+                    }
+                )
+                continue
+
+            try:
+                if request.action == 'get_messages':
+                    participant, messages = messenger.get_chat_messages(
+                        chat_id=request.chat_id,
+                        user_id=user.id,
+                    )
+                    await websocket.send_json(
+                        {
+                            'type': 'messages',
+                            'chat_id': request.chat_id,
+                            'messages': [
+                                _serialize_message(message, participant.id).model_dump()
+                                for message in messages
+                            ],
+                        }
+                    )
+                    continue
+
+                sent_message = messenger.send_message(
+                    chat_id=request.chat_id,
+                    sender_id=user.id,
+                    content=request.content or '',
+                )
+                sender_participant = messenger.get_chat_participant(
+                    chat_id=request.chat_id,
+                    user_id=user.id,
+                )
+                participants = messenger.get_chat_participants(chat_id=request.chat_id)
+                sender_notified = False
+                for participant in participants:
+                    serialized_message = _serialize_message(
+                        sent_message,
+                        participant.id,
+                    ).model_dump()
+                    if participant.user_id == user.id:
+                        serialized_message['client_message_id'] = request.client_message_id
+                        sender_notified = True
+
+                    await ws_manager.send_to_user(
+                        user_id=participant.user_id,
+                        payload={
+                            'type': 'message',
+                            'message': serialized_message,
+                        },
+                    )
+
+                if not sender_notified:
+                    sender_message = _serialize_message(
+                        sent_message,
+                        sender_participant.id,
+                    ).model_dump()
+                    sender_message['client_message_id'] = request.client_message_id
+                    await websocket.send_json(
+                        {
+                            'type': 'message',
+                            'message': sender_message,
+                        }
+                    )
+            except Exception as exc:
+                await websocket.send_json(
+                    {
+                        'type': 'error',
+                        'chat_id': request.chat_id,
+                        'detail': str(exc),
+                    }
+                )
+    except WebSocketDisconnect:
+        ws_manager.disconnect(user_id=user.id, websocket=websocket)

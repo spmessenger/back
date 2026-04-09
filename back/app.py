@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from db.session import ping_connection
 from db.settings import settings, DatabaseTypeEnum
 from db.misc import create_tables, drop_tables, ensure_tables_exist
+from .services.ws_manager import WebSocketConnectionManager
 from .router import base_router
 
 
@@ -20,6 +21,7 @@ async def lifespan(app: FastAPI):
         drop_tables()
 
 app = FastAPI(lifespan=lifespan)
+app.state.ws_manager = WebSocketConnectionManager()
 
 
 app.add_middleware(

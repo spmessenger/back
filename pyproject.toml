@@ -15,7 +15,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry.dependencies]
 python = "^3.11"
 fastapi = "^0.117.1"
-uvicorn = "^0.37.0"
+uvicorn = {extras = ["standard"], version = "^0.44.0"}
 core = { path = "../core", develop = true }
 mypy = "^1.18.2"
 httpx = "^0.28.1"

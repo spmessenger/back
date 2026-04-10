@@ -1,7 +1,8 @@
 from __future__ import annotations
-from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from core.entities.chat import Chat
+from core.entities.chat_group import ChatGroup
 from back.deps.auth import AuthUserDep, get_current_user_by_token
 from back.deps.settings import SecretKeyDep
 from back.deps.repos.chat import ChatRepoDep
@@ -12,8 +13,10 @@ from back.deps.services.storage import StorageServiceDep
 from .schemas import (
     AvailableUser,
     ChatCreation,
+    ChatGroupResponse,
     ChatMessageResponse,
     GroupCreationRequest,
+    ReplaceChatGroupsRequest,
     SendMessageRequest,
     WsChatActionRequest,
 )
@@ -52,6 +55,45 @@ async def get_chats(
     return chat_repo.find_all(user_id=user.id)
 
 
+@router.get('/chat-groups')
+async def get_chat_groups(
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+) -> list[ChatGroupResponse]:
+    groups = messenger.get_chat_groups(user_id=user.id)
+    return [
+        ChatGroupResponse(id=group.id, title=group.title, chat_ids=group.chat_ids)
+        for group in groups
+    ]
+
+
+@router.put('/chat-groups')
+async def replace_chat_groups(
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+    payload: ReplaceChatGroupsRequest = Body(),
+) -> list[ChatGroupResponse]:
+    try:
+        groups = messenger.replace_chat_groups(
+            user_id=user.id,
+            groups=[
+                ChatGroup.Creation(
+                    user_id=user.id,
+                    title=group.title,
+                    chat_ids=group.chat_ids,
+                )
+                for group in payload.groups
+            ],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return [
+        ChatGroupResponse(id=group.id, title=group.title, chat_ids=group.chat_ids)
+        for group in groups
+    ]
+
+
 @router.post('/chats/dialog')
 async def create_dialog(
     user: AuthUserDep,
@@ -67,6 +109,7 @@ async def create_group(
     user: AuthUserDep,
     messenger: MessengerServiceDep,
     storage: StorageServiceDep,
+    request: Request,
     payload: GroupCreationRequest = Body(),
 ) -> ChatCreation:
     avatar_url: str | None = None
@@ -81,6 +124,19 @@ async def create_group(
 
     chat, participants = messenger.create_group_chat(
         user.id, payload.title, payload.participants, avatar_url)
+
+    ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
+    for participant in participants:
+        if participant.user_id == user.id:
+            continue
+        await ws_manager.send_to_user(
+            user_id=participant.user_id,
+            payload={
+                'type': 'chat_created',
+                'chat_id': chat.id,
+            },
+        )
+
     return ChatCreation(chat=chat, participants=participants)
 
 
@@ -104,6 +160,24 @@ async def send_chat_message(
     participant = messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
     message = messenger.send_message(chat_id, user.id, payload.content)
     return _serialize_message(message, participant.id)
+
+
+@router.post('/chats/{chat_id}/pin')
+async def pin_chat(
+    chat_id: int,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+) -> bool:
+    return messenger.pin_chat(chat_id=chat_id, user_id=user.id)
+
+
+@router.post('/chats/{chat_id}/unpin')
+async def unpin_chat(
+    chat_id: int,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+) -> bool:
+    return messenger.unpin_chat(chat_id=chat_id, user_id=user.id)
 
 
 @router.websocket('/ws/chats')
@@ -143,14 +217,18 @@ async def chats_socket(
 
             try:
                 if request.action == 'get_messages':
-                    participant, messages = messenger.get_chat_messages(
+                    participant, messages, has_more = messenger.get_chat_messages_page(
                         chat_id=request.chat_id,
                         user_id=user.id,
+                        before_message_id=request.before_message_id,
+                        limit=request.limit or 50,
                     )
                     await websocket.send_json(
                         {
                             'type': 'messages',
                             'chat_id': request.chat_id,
+                            'has_more': has_more,
+                            'request_before_message_id': request.before_message_id,
                             'messages': [
                                 _serialize_message(message, participant.id).model_dump()
                                 for message in messages
@@ -168,16 +246,27 @@ async def chats_socket(
                     chat_id=request.chat_id,
                     user_id=user.id,
                 )
+                sender_message = _serialize_message(
+                    sent_message,
+                    sender_participant.id,
+                ).model_dump()
+                sender_message['client_message_id'] = request.client_message_id
+                await websocket.send_json(
+                    {
+                        'type': 'message',
+                        'message': sender_message,
+                    }
+                )
+
                 participants = messenger.get_chat_participants(chat_id=request.chat_id)
-                sender_notified = False
                 for participant in participants:
+                    if participant.user_id == user.id:
+                        continue
+
                     serialized_message = _serialize_message(
                         sent_message,
                         participant.id,
                     ).model_dump()
-                    if participant.user_id == user.id:
-                        serialized_message['client_message_id'] = request.client_message_id
-                        sender_notified = True
 
                     await ws_manager.send_to_user(
                         user_id=participant.user_id,
@@ -185,19 +274,6 @@ async def chats_socket(
                             'type': 'message',
                             'message': serialized_message,
                         },
-                    )
-
-                if not sender_notified:
-                    sender_message = _serialize_message(
-                        sent_message,
-                        sender_participant.id,
-                    ).model_dump()
-                    sender_message['client_message_id'] = request.client_message_id
-                    await websocket.send_json(
-                        {
-                            'type': 'message',
-                            'message': sender_message,
-                        }
                     )
             except Exception as exc:
                 await websocket.send_json(

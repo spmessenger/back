@@ -3,8 +3,13 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any
+import logging
 
 from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
+
+
+logger = logging.getLogger(__name__)
 
 
 class WebSocketConnectionManager:
@@ -30,5 +35,10 @@ class WebSocketConnectionManager:
         for websocket in user_connections:
             try:
                 await websocket.send_json(dict(payload))
-            except Exception:
+            except (WebSocketDisconnect, RuntimeError):
+                self.disconnect(user_id=user_id, websocket=websocket)
+            except OSError:
+                self.disconnect(user_id=user_id, websocket=websocket)
+            except ValueError:
+                logger.exception("Invalid websocket payload for user_id=%s", user_id)
                 self.disconnect(user_id=user_id, websocket=websocket)

@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from pydantic import model_validator
 from core.entities import Chat, Participant
 from typing import Literal
+from back.schemas import AvatarUpload
 
 
 class ChatCreation(BaseModel):
@@ -12,14 +13,7 @@ class ChatCreation(BaseModel):
 class AvailableUser(BaseModel):
     id: int
     username: str
-
-
-class AvatarUpload(BaseModel):
-    data_url: str
-    stage_size: float
-    crop_x: float
-    crop_y: float
-    crop_size: float
+    avatar_url: str | None = None
 
 
 class GroupCreationRequest(BaseModel):

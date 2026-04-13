@@ -41,7 +41,11 @@ async def get_available_users(
 ) -> list[AvailableUser]:
     users = user_repo.find_all()
     return [
-        AvailableUser(id=registered_user.id, username=registered_user.username)
+        AvailableUser(
+            id=registered_user.id,
+            username=registered_user.username,
+            avatar_url=registered_user.avatar_url,
+        )
         for registered_user in users
         if registered_user.id != user.id
     ]

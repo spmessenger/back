@@ -59,6 +59,25 @@ class S3StorageService:
         encoded = base64.b64encode(image_bytes).decode('utf-8')
         return f'data:image/png;base64,{encoded}'
 
+    def render_profile_avatar_data_url(
+        self,
+        *,
+        data_url: str,
+        stage_size: float,
+        crop_x: float,
+        crop_y: float,
+        crop_size: float,
+    ) -> str:
+        image_bytes = self._render_group_avatar_bytes(
+            data_url=data_url,
+            stage_size=stage_size,
+            crop_x=crop_x,
+            crop_y=crop_y,
+            crop_size=crop_size,
+        )
+        encoded = base64.b64encode(image_bytes).decode('utf-8')
+        return f'data:image/png;base64,{encoded}'
+
     def upload_group_avatar(
         self,
         *,

@@ -28,6 +28,7 @@ def _serialize_message(message, own_participant_id: int) -> ChatMessageResponse:
     return ChatMessageResponse(
         id=message.id,
         chat_id=message.chat_id,
+        reference_message_id=message.reference_message_id,
         content=message.content,
         created_at_timestamp=float(message.created_at_timestamp),
         is_own=message.participant_id == own_participant_id,
@@ -162,7 +163,15 @@ async def send_chat_message(
     payload: SendMessageRequest = Body(),
 ) -> ChatMessageResponse:
     participant = messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
-    message = messenger.send_message(chat_id, user.id, payload.content)
+    try:
+        message = messenger.send_message(
+            chat_id,
+            user.id,
+            payload.content,
+            reference_message_id=payload.reference_message_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _serialize_message(message, participant.id)
 
 
@@ -245,6 +254,7 @@ async def chats_socket(
                     chat_id=request.chat_id,
                     sender_id=user.id,
                     content=request.content or '',
+                    reference_message_id=request.reference_message_id,
                 )
                 sender_participant = messenger.get_chat_participant(
                     chat_id=request.chat_id,

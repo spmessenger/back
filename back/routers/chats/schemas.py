@@ -24,11 +24,13 @@ class GroupCreationRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str
+    reference_message_id: int | None = None
 
 
 class ChatMessageResponse(BaseModel):
     id: int
     chat_id: int
+    reference_message_id: int | None = None
     content: str
     created_at_timestamp: float
     is_own: bool
@@ -38,6 +40,7 @@ class WsChatActionRequest(BaseModel):
     action: Literal['get_messages', 'send_message']
     chat_id: int
     content: str | None = None
+    reference_message_id: int | None = None
     client_message_id: str | None = None
     before_message_id: int | None = None
     limit: int | None = 50

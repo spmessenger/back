@@ -1,11 +1,17 @@
 from contextlib import asynccontextmanager
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from db.session import ping_connection
 from db.settings import settings, DatabaseTypeEnum
 from db.misc import create_tables, drop_tables, ensure_tables_exist
 from .services.ws_manager import WebSocketConnectionManager
+from .services.storage import S3StorageService
 from .router import base_router
+
+logger = logging.getLogger('uvicorn.error')
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 
 @asynccontextmanager
@@ -16,6 +22,14 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             'Database connection failed during application startup')
     ensure_tables_exist()
+
+    storage = S3StorageService()
+    app.state.s3_available = storage.ping_connection()
+    if app.state.s3_available:
+        logger.info('S3/MinIO connection is available at startup.')
+    else:
+        logger.warning('S3/MinIO is not reachable at startup. Local attachment fallback will be used.')
+
     yield
     if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:
         drop_tables()

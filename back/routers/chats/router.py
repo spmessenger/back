@@ -16,6 +16,7 @@ from back.deps.repos.chat import ChatRepoDep
 from back.deps.repos.user import UserRepoDep
 from back.deps.services.messenger import MessengerServiceDep
 from back.deps.services.watch_room import WatchRoomServiceDep
+from back.deps.services.expense_split import ExpenseSplitServiceDep
 from back.services.ws_manager import WebSocketConnectionManager
 from back.deps.services.storage import StorageServiceDep
 from .schemas import (
@@ -25,6 +26,14 @@ from .schemas import (
     AttachmentInitRequest,
     AttachmentInitResponse,
     AvailableUser,
+    ExpenseBalanceResponse,
+    ExpenseCreateRequest,
+    ExpenseMarkPaidRequest,
+    ExpenseOverviewResponse,
+    ExpensePaymentResponse,
+    ExpenseParticipantShareResponse,
+    ExpenseResponse,
+    ExpenseSettlementResponse,
     ChatCreation,
     ChatAttachmentResponse,
     ChatGroupResponse,
@@ -35,6 +44,8 @@ from .schemas import (
     WatchRoomInviteRequest,
     WatchRoomInviteResponse,
     WatchRoomResponse,
+    WatchRoomChatMessageResponse,
+    WatchRoomViewerSyncStateResponse,
     WatchRoomSyncRequest,
     ReplaceChatGroupsRequest,
     SendMessageRequest,
@@ -268,6 +279,15 @@ def _resolve_chat_last_message_preview(last_message: str | None) -> str | None:
 
 def _serialize_watch_room(room) -> WatchRoomResponse:
     viewer_ids = sorted(room.viewer_user_ids)
+    viewer_sync_states = [
+        WatchRoomViewerSyncStateResponse(
+            user_id=user_id,
+            current_time_seconds=current_time_seconds,
+            is_playing=is_playing,
+            updated_at=updated_at,
+        )
+        for user_id, (current_time_seconds, is_playing, updated_at) in sorted(room.viewer_sync_states.items())
+    ]
     return WatchRoomResponse(
         id=room.id,
         chat_id=room.chat_id,
@@ -278,6 +298,7 @@ def _serialize_watch_room(room) -> WatchRoomResponse:
         sync_revision=room.sync_revision,
         sync_current_time_seconds=room.sync_current_time_seconds,
         sync_is_playing=room.sync_is_playing,
+        viewer_sync_states=viewer_sync_states,
         created_at=room.created_at,
     )
 
@@ -294,6 +315,73 @@ def _serialize_watch_room_invite(invite) -> WatchRoomInviteResponse:
         youtube_video_id=invite.youtube_video_id,
         status=invite.status,  # type: ignore[arg-type]
         created_at=invite.created_at,
+    )
+
+
+def _serialize_watch_room_chat_message(message) -> WatchRoomChatMessageResponse:
+    return WatchRoomChatMessageResponse(
+        id=message.id,
+        room_id=message.room_id,
+        user_id=message.user_id,
+        username=message.username,
+        content=message.content,
+        created_at=message.created_at,
+    )
+
+
+def _serialize_expense(expense) -> ExpenseResponse:
+    shares = [
+        ExpenseParticipantShareResponse(user_id=user_id, share_minor=share_minor)
+        for user_id, share_minor in sorted(expense.shares_minor_by_user_id.items())
+    ]
+    return ExpenseResponse(
+        id=expense.id,
+        chat_id=expense.chat_id,
+        title=expense.title,
+        amount_minor=expense.amount_minor,
+        currency=expense.currency,
+        payer_user_id=expense.payer_user_id,
+        created_by_user_id=expense.created_by_user_id,
+        created_at=expense.created_at,
+        shares=shares,
+    )
+
+
+def _build_expense_overview(*, chat_id: int, expenses: ExpenseSplitServiceDep) -> ExpenseOverviewResponse:
+    chat_expenses = expenses.list_expenses(chat_id=chat_id)
+    currency = chat_expenses[0].currency if chat_expenses else 'RUB'
+    balances = [
+        ExpenseBalanceResponse(user_id=user_id, balance_minor=balance_minor)
+        for user_id, balance_minor in sorted(expenses.compute_balances(chat_id=chat_id).items())
+    ]
+    settlements = [
+        ExpenseSettlementResponse(
+            from_user_id=settlement.from_user_id,
+            to_user_id=settlement.to_user_id,
+            amount_minor=settlement.amount_minor,
+        )
+        for settlement in expenses.compute_outstanding_settlements(chat_id=chat_id)
+    ]
+
+    return ExpenseOverviewResponse(
+        chat_id=chat_id,
+        currency=currency,
+        total_expenses_minor=expenses.total_expenses_minor(chat_id=chat_id),
+        balances=balances,
+        settlements=settlements,
+        open_expense_count=len(chat_expenses),
+    )
+
+
+def _serialize_expense_payment(payment) -> ExpensePaymentResponse:
+    return ExpensePaymentResponse(
+        id=payment.id,
+        chat_id=payment.chat_id,
+        from_user_id=payment.from_user_id,
+        to_user_id=payment.to_user_id,
+        amount_minor=payment.amount_minor,
+        created_by_user_id=payment.created_by_user_id,
+        created_at=payment.created_at,
     )
 
 
@@ -326,6 +414,131 @@ async def get_chats(
         )
         for chat in chats
     ]
+
+
+@router.get('/chats/{chat_id}/participants')
+async def get_chat_participants(
+    chat_id: int,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+    user_repo: UserRepoDep,
+) -> list[AvailableUser]:
+    messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
+    participants = messenger.get_chat_participants(chat_id=chat_id)
+    users = {registered_user.id: registered_user for registered_user in user_repo.find_all()}
+    result: list[AvailableUser] = []
+    for participant in participants:
+        participant_user = users.get(participant.user_id)
+        if participant_user is None:
+            continue
+        result.append(
+            AvailableUser(
+                id=participant_user.id,
+                username=participant_user.username,
+                avatar_url=participant_user.avatar_url,
+            )
+        )
+    return result
+
+
+@router.post('/chats/{chat_id}/expenses')
+async def create_chat_expense(
+    chat_id: int,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+    expenses: ExpenseSplitServiceDep,
+    payload: ExpenseCreateRequest = Body(),
+) -> ExpenseResponse:
+    messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
+    for participant_user_id in payload.participant_user_ids:
+        messenger.get_chat_participant(chat_id=chat_id, user_id=participant_user_id)
+    messenger.get_chat_participant(chat_id=chat_id, user_id=payload.payer_user_id)
+
+    shares_minor_by_user_id: dict[int, int] | None = None
+    if payload.shares_minor is not None:
+        shares_minor_by_user_id = {
+            item.user_id: item.share_minor
+            for item in payload.shares_minor
+        }
+
+    try:
+        expense = expenses.create_expense(
+            chat_id=chat_id,
+            title=payload.title,
+            amount_minor=payload.amount_minor,
+            currency=payload.currency,
+            payer_user_id=payload.payer_user_id,
+            created_by_user_id=user.id,
+            participant_user_ids=payload.participant_user_ids,
+            shares_minor_by_user_id=shares_minor_by_user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _serialize_expense(expense)
+
+
+@router.get('/chats/{chat_id}/expenses')
+async def get_chat_expenses(
+    chat_id: int,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+    expenses: ExpenseSplitServiceDep,
+) -> list[ExpenseResponse]:
+    messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
+    return [
+        _serialize_expense(expense)
+        for expense in expenses.list_expenses(chat_id=chat_id)
+    ]
+
+
+@router.get('/chats/{chat_id}/expenses/payments')
+async def get_chat_expense_payments(
+    chat_id: int,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+    expenses: ExpenseSplitServiceDep,
+) -> list[ExpensePaymentResponse]:
+    messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
+    return [
+        _serialize_expense_payment(payment)
+        for payment in expenses.list_payments(chat_id=chat_id)
+    ]
+
+
+@router.get('/chats/{chat_id}/expenses/overview')
+async def get_chat_expense_overview(
+    chat_id: int,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+    expenses: ExpenseSplitServiceDep,
+) -> ExpenseOverviewResponse:
+    messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
+    return _build_expense_overview(chat_id=chat_id, expenses=expenses)
+
+
+@router.post('/chats/{chat_id}/expenses/settlements/mark-paid')
+async def mark_chat_expense_settlement_paid(
+    chat_id: int,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+    expenses: ExpenseSplitServiceDep,
+    payload: ExpenseMarkPaidRequest = Body(),
+) -> ExpenseOverviewResponse:
+    messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
+    messenger.get_chat_participant(chat_id=chat_id, user_id=payload.from_user_id)
+    messenger.get_chat_participant(chat_id=chat_id, user_id=payload.to_user_id)
+    try:
+        expenses.mark_settlement_paid(
+            chat_id=chat_id,
+            from_user_id=payload.from_user_id,
+            to_user_id=payload.to_user_id,
+            amount_minor=payload.amount_minor,
+            created_by_user_id=user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _build_expense_overview(chat_id=chat_id, expenses=expenses)
 
 
 @router.get('/chat-groups')
@@ -396,7 +609,7 @@ async def get_link_preview(
 
 async def _broadcast_watch_room_update(
     *,
-    request: Request,
+    request: Request | WebSocket,
     messenger: MessengerServiceDep,
     room,
 ) -> None:
@@ -407,6 +620,25 @@ async def _broadcast_watch_room_update(
     payload = {
         'type': 'watch_room_updated',
         'room': _serialize_watch_room(room).model_dump(),
+    }
+    for user_id in recipients:
+        await ws_manager.send_to_user(user_id=user_id, payload=payload)
+
+
+async def _broadcast_watch_room_chat_message(
+    *,
+    request: Request | WebSocket,
+    messenger: MessengerServiceDep,
+    room,
+    message,
+) -> None:
+    ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
+    participants = messenger.get_chat_participants(chat_id=room.chat_id)
+    recipients = {participant.user_id for participant in participants}
+    recipients.update(room.viewer_user_ids)
+    payload = {
+        'type': 'watch_room_chat_message',
+        'message': _serialize_watch_room_chat_message(message).model_dump(),
     }
     for user_id in recipients:
         await ws_manager.send_to_user(user_id=user_id, payload=payload)
@@ -468,6 +700,23 @@ async def get_watch_room(
     return _serialize_watch_room(room)
 
 
+@router.get('/watch-rooms/{room_id}/messages')
+async def get_watch_room_messages(
+    room_id: str,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+    watch_rooms: WatchRoomServiceDep,
+    limit: int = Query(default=100, ge=1, le=300),
+) -> list[WatchRoomChatMessageResponse]:
+    room = watch_rooms.get_room(room_id)
+    if not _can_access_watch_room(room, user.id, messenger):
+        raise HTTPException(status_code=403, detail='Access denied')
+    return [
+        _serialize_watch_room_chat_message(message)
+        for message in watch_rooms.list_chat_messages(room_id=room_id, limit=limit)
+    ]
+
+
 @router.post('/watch-rooms/{room_id}/join')
 async def join_watch_room(
     room_id: str,
@@ -515,6 +764,7 @@ async def sync_watch_room(
         raise HTTPException(status_code=403, detail='Access denied')
     room = watch_rooms.sync_room(
         room_id=room_id,
+        user_id=user.id,
         current_time_seconds=payload.current_time_seconds,
         is_playing=payload.is_playing,
     )
@@ -894,6 +1144,7 @@ async def chats_socket(
     user_repo: UserRepoDep,
     secret_key: SecretKeyDep,
     messenger: MessengerServiceDep,
+    watch_rooms: WatchRoomServiceDep,
 ):
     access_token = websocket.cookies.get('access_token')
     try:
@@ -942,6 +1193,41 @@ async def chats_socket(
                                 for message in messages
                             ],
                         }
+                    )
+                    continue
+
+                if request.action == 'watch_room_playback':
+                    room = watch_rooms.get_room(request.room_id or '')
+                    if not _can_access_watch_room(room, user.id, messenger):
+                        raise ValueError('Access denied')
+                    room = watch_rooms.sync_room(
+                        room_id=room.id,
+                        user_id=user.id,
+                        current_time_seconds=request.current_time_seconds or 0.0,
+                        is_playing=bool(request.is_playing),
+                    )
+                    await _broadcast_watch_room_update(
+                        request=websocket,
+                        messenger=messenger,
+                        room=room,
+                    )
+                    continue
+
+                if request.action == 'watch_room_chat_send':
+                    room = watch_rooms.get_room(request.room_id or '')
+                    if not _can_access_watch_room(room, user.id, messenger):
+                        raise ValueError('Access denied')
+                    chat_message = watch_rooms.add_chat_message(
+                        room_id=room.id,
+                        user_id=user.id,
+                        username=user.username,
+                        content=request.content or '',
+                    )
+                    await _broadcast_watch_room_chat_message(
+                        request=websocket,
+                        messenger=messenger,
+                        room=room,
+                        message=chat_message,
                     )
                     continue
 
@@ -995,3 +1281,11 @@ async def chats_socket(
                 )
     except WebSocketDisconnect:
         ws_manager.disconnect(user_id=user.id, websocket=websocket)
+        if not ws_manager.has_user_connections(user.id):
+            changed_rooms = watch_rooms.leave_user_from_all_rooms(user.id)
+            for room in changed_rooms:
+                await _broadcast_watch_room_update(
+                    request=websocket,
+                    messenger=messenger,
+                    room=room,
+                )

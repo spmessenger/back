@@ -59,7 +59,7 @@ class ChatMessageResponse(BaseModel):
 
 
 class WsChatActionRequest(BaseModel):
-    action: Literal['get_messages', 'send_message']
+    action: Literal['get_messages', 'send_message', 'watch_room_playback', 'watch_room_chat_send']
     chat_id: int
     content: str | None = None
     reference_message_id: int | None = None
@@ -67,11 +67,26 @@ class WsChatActionRequest(BaseModel):
     client_message_id: str | None = None
     before_message_id: int | None = None
     limit: int | None = 50
+    room_id: str | None = None
+    current_time_seconds: float | None = None
+    is_playing: bool | None = None
 
     @model_validator(mode='after')
     def validate_content_for_send(self) -> 'WsChatActionRequest':
         if self.action == 'send_message' and not self.content:
             raise ValueError('content is required for send_message action')
+        if self.action == 'watch_room_playback':
+            if self.room_id is None:
+                raise ValueError('room_id is required for watch_room_playback action')
+            if self.current_time_seconds is None:
+                raise ValueError('current_time_seconds is required for watch_room_playback action')
+            if self.is_playing is None:
+                raise ValueError('is_playing is required for watch_room_playback action')
+        if self.action == 'watch_room_chat_send':
+            if self.room_id is None:
+                raise ValueError('room_id is required for watch_room_chat_send action')
+            if not self.content:
+                raise ValueError('content is required for watch_room_chat_send action')
         return self
 
 
@@ -158,6 +173,13 @@ class WatchRoomInviteResponse(BaseModel):
     created_at: float
 
 
+class WatchRoomViewerSyncStateResponse(BaseModel):
+    user_id: int
+    current_time_seconds: float
+    is_playing: bool
+    updated_at: float
+
+
 class WatchRoomResponse(BaseModel):
     id: str
     chat_id: int
@@ -168,4 +190,81 @@ class WatchRoomResponse(BaseModel):
     sync_revision: int
     sync_current_time_seconds: float
     sync_is_playing: bool
+    viewer_sync_states: list[WatchRoomViewerSyncStateResponse]
+    created_at: float
+
+
+class WatchRoomChatMessageResponse(BaseModel):
+    id: str
+    room_id: str
+    user_id: int
+    username: str
+    content: str
+    created_at: float
+
+
+class ExpenseParticipantShareInput(BaseModel):
+    user_id: int
+    share_minor: int = Field(ge=0)
+
+
+class ExpenseCreateRequest(BaseModel):
+    title: str
+    amount_minor: int = Field(gt=0)
+    currency: str = 'RUB'
+    payer_user_id: int
+    participant_user_ids: list[int] = Field(default_factory=list, min_length=1)
+    shares_minor: list[ExpenseParticipantShareInput] | None = None
+
+
+class ExpenseParticipantShareResponse(BaseModel):
+    user_id: int
+    share_minor: int
+
+
+class ExpenseResponse(BaseModel):
+    id: str
+    chat_id: int
+    title: str
+    amount_minor: int
+    currency: str
+    payer_user_id: int
+    created_by_user_id: int
+    created_at: float
+    shares: list[ExpenseParticipantShareResponse]
+
+
+class ExpenseBalanceResponse(BaseModel):
+    user_id: int
+    balance_minor: int
+
+
+class ExpenseSettlementResponse(BaseModel):
+    from_user_id: int
+    to_user_id: int
+    amount_minor: int
+
+
+class ExpenseMarkPaidRequest(BaseModel):
+    from_user_id: int
+    to_user_id: int
+    amount_minor: int = Field(gt=0)
+
+
+class ExpenseOverviewResponse(BaseModel):
+    chat_id: int
+    currency: str
+    total_expenses_minor: int
+    balances: list[ExpenseBalanceResponse]
+    settlements: list[ExpenseSettlementResponse]
+    open_expense_count: int
+
+
+class ExpensePaymentResponse(BaseModel):
+    id: str
+    chat_id: int
+    from_user_id: int
+    to_user_id: int
+    amount_minor: int
+    created_by_user_id: int
     created_at: float

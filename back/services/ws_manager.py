@@ -42,3 +42,6 @@ class WebSocketConnectionManager:
             except ValueError:
                 logger.exception("Invalid websocket payload for user_id=%s", user_id)
                 self.disconnect(user_id=user_id, websocket=websocket)
+
+    def has_user_connections(self, user_id: int) -> bool:
+        return bool(self._connections.get(user_id))

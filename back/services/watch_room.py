@@ -15,6 +15,7 @@ class WatchRoom:
     sync_revision: int
     sync_current_time_seconds: float
     sync_is_playing: bool
+    viewer_sync_states: dict[int, tuple[float, bool, float]]
     created_at: float
 
 
@@ -32,10 +33,21 @@ class WatchRoomInvite:
     created_at: float
 
 
+@dataclass
+class WatchRoomChatMessage:
+    id: str
+    room_id: str
+    user_id: int
+    username: str
+    content: str
+    created_at: float
+
+
 class WatchRoomService:
     _rooms: dict[str, WatchRoom] = {}
     _rooms_by_chat_and_video: dict[tuple[int, str], str] = {}
     _invites: dict[str, WatchRoomInvite] = {}
+    _chat_messages_by_room_id: dict[str, list[WatchRoomChatMessage]] = {}
 
     def find_room(self, *, chat_id: int, youtube_video_id: str) -> WatchRoom | None:
         room_id = self._rooms_by_chat_and_video.get((chat_id, youtube_video_id))
@@ -56,6 +68,12 @@ class WatchRoomService:
         existing = self.find_room(chat_id=chat_id, youtube_video_id=youtube_video_id)
         if existing is not None:
             existing.viewer_user_ids.add(host_user_id)
+            if host_user_id not in existing.viewer_sync_states:
+                existing.viewer_sync_states[host_user_id] = (
+                    existing.sync_current_time_seconds,
+                    existing.sync_is_playing,
+                    time.time(),
+                )
             self._rooms[existing.id] = existing
             return existing
 
@@ -68,6 +86,7 @@ class WatchRoomService:
             sync_revision=0,
             sync_current_time_seconds=0.0,
             sync_is_playing=True,
+            viewer_sync_states={host_user_id: (0.0, True, time.time())},
             created_at=time.time(),
         )
         self._rooms[room.id] = room
@@ -77,15 +96,22 @@ class WatchRoomService:
     def join_room(self, *, room_id: str, user_id: int) -> WatchRoom:
         room = self.get_room(room_id)
         room.viewer_user_ids.add(user_id)
+        room.viewer_sync_states[user_id] = (
+            room.sync_current_time_seconds,
+            room.sync_is_playing,
+            time.time(),
+        )
         self._rooms[room.id] = room
         return room
 
     def leave_room(self, *, room_id: str, user_id: int) -> WatchRoom:
         room = self.get_room(room_id)
         room.viewer_user_ids.discard(user_id)
+        room.viewer_sync_states.pop(user_id, None)
         if not room.viewer_user_ids:
             self._rooms.pop(room.id, None)
             self._rooms_by_chat_and_video.pop((room.chat_id, room.youtube_video_id), None)
+            self._chat_messages_by_room_id.pop(room.id, None)
             return room
 
         if room.host_user_id == user_id:
@@ -93,11 +119,67 @@ class WatchRoomService:
         self._rooms[room.id] = room
         return room
 
-    def sync_room(self, *, room_id: str, current_time_seconds: float, is_playing: bool) -> WatchRoom:
+    def list_chat_messages(self, *, room_id: str, limit: int = 100) -> list[WatchRoomChatMessage]:
+        self.get_room(room_id)
+        messages = self._chat_messages_by_room_id.get(room_id, [])
+        if limit <= 0:
+            return []
+        return messages[-limit:]
+
+    def add_chat_message(
+        self,
+        *,
+        room_id: str,
+        user_id: int,
+        username: str,
+        content: str,
+    ) -> WatchRoomChatMessage:
         room = self.get_room(room_id)
+        normalized_content = content.strip()
+        if not normalized_content:
+            raise ValueError('Message content is required')
+        if user_id not in room.viewer_user_ids:
+            room.viewer_user_ids.add(user_id)
+            room.viewer_sync_states[user_id] = (
+                room.sync_current_time_seconds,
+                room.sync_is_playing,
+                time.time(),
+            )
+            self._rooms[room.id] = room
+
+        message = WatchRoomChatMessage(
+            id=uuid4().hex,
+            room_id=room_id,
+            user_id=user_id,
+            username=username,
+            content=normalized_content,
+            created_at=time.time(),
+        )
+        room_messages = self._chat_messages_by_room_id.setdefault(room_id, [])
+        room_messages.append(message)
+        if len(room_messages) > 400:
+            del room_messages[:-400]
+        return message
+
+    def sync_room(
+        self,
+        *,
+        room_id: str,
+        user_id: int,
+        current_time_seconds: float,
+        is_playing: bool,
+    ) -> WatchRoom:
+        room = self.get_room(room_id)
+        if user_id not in room.viewer_user_ids:
+            room.viewer_user_ids.add(user_id)
         room.sync_revision += 1
         room.sync_current_time_seconds = max(0.0, float(current_time_seconds))
         room.sync_is_playing = bool(is_playing)
+        room.viewer_sync_states[user_id] = (
+            room.sync_current_time_seconds,
+            room.sync_is_playing,
+            time.time(),
+        )
         self._rooms[room.id] = room
         return room
 
@@ -156,3 +238,16 @@ class WatchRoomService:
         invite.status = 'declined'
         self._invites[invite.id] = invite
         return invite
+
+    def leave_user_from_all_rooms(self, user_id: int) -> list[WatchRoom]:
+        changed_rooms: list[WatchRoom] = []
+        for room_id in list(self._rooms.keys()):
+            room = self._rooms.get(room_id)
+            if room is None:
+                continue
+            if user_id not in room.viewer_user_ids:
+                continue
+            updated_room = self.leave_room(room_id=room_id, user_id=user_id)
+            if self.has_room(updated_room.id):
+                changed_rooms.append(updated_room)
+        return changed_rooms

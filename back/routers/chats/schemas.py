@@ -24,7 +24,7 @@ class GroupCreationRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str
-    content_type: Literal['text', 'image', 'video', 'document'] | None = None
+    content_type: Literal['text', 'image', 'video', 'document', 'voice'] | None = None
     attachment_id: str | None = None
     attachment_group_id: str | None = None
     reference_message_id: int | None = None
@@ -51,11 +51,16 @@ class ChatMessageResponse(BaseModel):
     forwarded_from_author_avatar_url: str | None = None
     forwarded_from_content: str | None = None
     content: str
-    content_type: Literal['text', 'image', 'video', 'document'] = 'text'
+    content_type: Literal['text', 'image', 'video', 'document', 'voice'] = 'text'
     attachment: ChatAttachmentResponse | None = None
     attachment_group_id: str | None = None
     created_at_timestamp: float
     is_own: bool
+
+
+class ChatMessageDeleteResponse(BaseModel):
+    chat_id: int
+    message_id: int
 
 
 class WsChatActionRequest(BaseModel):
@@ -184,6 +189,7 @@ class WatchRoomResponse(BaseModel):
     id: str
     chat_id: int
     youtube_video_id: str
+    youtube_access_mode: Literal['direct', 'assisted'] = 'direct'
     host_user_id: int
     viewer_user_ids: list[int]
     viewer_count: int

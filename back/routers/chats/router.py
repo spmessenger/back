@@ -3,10 +3,10 @@ import json
 import ipaddress
 import re
 from html import unescape
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 import httpx
 from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import ValidationError
 from core.entities.chat import Chat
 from core.entities.chat_group import ChatGroup
@@ -17,7 +17,9 @@ from back.deps.repos.user import UserRepoDep
 from back.deps.services.messenger import MessengerServiceDep
 from back.deps.services.watch_room import WatchRoomServiceDep
 from back.deps.services.expense_split import ExpenseSplitServiceDep
+from back.settings import settings as back_settings
 from back.services.ws_manager import WebSocketConnectionManager
+from back.services.youtube_access import resolve_youtube_access_context_for_user
 from back.deps.services.storage import StorageServiceDep
 from .schemas import (
     AttachmentCompleteRequest,
@@ -38,6 +40,7 @@ from .schemas import (
     ChatAttachmentResponse,
     ChatGroupResponse,
     ChatMessageResponse,
+    ChatMessageDeleteResponse,
     GroupCreationRequest,
     LinkPreviewResponse,
     WatchRoomCreateRequest,
@@ -57,6 +60,12 @@ ATTACHMENT_CONTENT_PREFIX = '__attachment_v1__:'
 META_TAG_RE = re.compile(r'<meta[^>]+>', re.IGNORECASE)
 ATTR_RE = re.compile(r'([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*([\'"])(.*?)\2')
 TITLE_RE = re.compile(r'<title[^>]*>(.*?)</title>', re.IGNORECASE | re.DOTALL)
+ABSOLUTE_URL_RE = re.compile(r'https?://[^\s"\'<>]+', re.IGNORECASE)
+PROTOCOL_RELATIVE_URL_RE = re.compile(r'(?P<prefix>["\'(=,:\s])//(?P<host>[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(?P<path>/[^\s"\'<>]*)?')
+ROOT_RELATIVE_ATTR_RE = re.compile(r'(?P<quote>["\'])/(?P<path>(?!/)[^"\']+)(?P=quote)')
+ASSIST_TEXT_CONTENT_TYPES = (
+    'text/html',
+)
 
 
 def _serialize_content_value(
@@ -197,6 +206,183 @@ def _normalize_external_url(raw_value: str) -> str:
     return normalized
 
 
+def _normalize_assist_tunnel_url(raw_value: str) -> str:
+    normalized = raw_value.strip()
+    if not normalized:
+        raise ValueError('URL is empty')
+
+    # Handle protocol-relative and relative chunks produced by JS runtime links.
+    if normalized.startswith('//'):
+        normalized = f'https:{normalized}'
+    elif normalized.startswith('/'):
+        normalized = f'https://www.youtube.com{normalized}'
+    elif not normalized.startswith(('http://', 'https://')):
+        if '/' in normalized and '.' not in normalized.split('/', 1)[0]:
+            normalized = f'https://www.youtube.com/{normalized.lstrip("/")}'
+        else:
+            normalized = f'https://{normalized}'
+
+    try:
+        parsed = urlparse(normalized)
+    except ValueError as exc:
+        raise ValueError('Invalid URL format') from exc
+
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        raise ValueError('Only absolute HTTP/HTTPS URLs are allowed')
+    return normalized
+
+
+def _parse_assist_allowed_hosts(raw_value: str) -> tuple[str, ...]:
+    return tuple(
+        host.strip().lower()
+        for host in raw_value.split(',')
+        if host.strip()
+    )
+
+
+def _is_allowed_assist_host(host: str | None) -> bool:
+    if not host:
+        return False
+    host_lower = host.strip().lower()
+    if not host_lower:
+        return False
+    allowed_hosts = _parse_assist_allowed_hosts(back_settings.YOUTUBE_ASSIST_PROXY_ALLOWED_HOSTS)
+    return any(host_lower == allowed or host_lower.endswith(f'.{allowed}') for allowed in allowed_hosts)
+
+
+def _is_assist_text_content_type(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    normalized_content_type = content_type.lower()
+    return any(media_type in normalized_content_type for media_type in ASSIST_TEXT_CONTENT_TYPES)
+
+
+def _build_assist_tunnel_url(raw_url: str) -> str:
+    return f'/api/youtube/assist/tunnel?url={quote(raw_url, safe="")}'
+
+
+def _ensure_assisted_enabled_for_user(user: AuthUserDep) -> None:
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    if access_context.youtube_access_mode != 'assisted':
+        raise HTTPException(
+            status_code=403,
+            detail='Assisted transport is available only when assisted mode is enabled',
+        )
+
+
+def _rewrite_assist_proxy_text_payload(payload_text: str, *, base_url: str) -> str:
+    if '/api/youtube/assist/tunnel?url=' in payload_text:
+        # Already rewritten response chunk.
+        return payload_text
+
+    def replace_absolute_url(match: re.Match[str]) -> str:
+        candidate_url = match.group(0)
+        try:
+            parsed = urlparse(candidate_url)
+        except ValueError:
+            return candidate_url
+        if not _is_allowed_assist_host(parsed.hostname):
+            return candidate_url
+        return _build_assist_tunnel_url(candidate_url)
+
+    rewritten = ABSOLUTE_URL_RE.sub(replace_absolute_url, payload_text)
+
+    def replace_protocol_relative_url(match: re.Match[str]) -> str:
+        prefix = match.group('prefix')
+        host = (match.group('host') or '').lower()
+        path = match.group('path') or ''
+        if not _is_allowed_assist_host(host):
+            return match.group(0)
+        absolute = f'https://{host}{path}'
+        return f'{prefix}{_build_assist_tunnel_url(absolute)}'
+
+    rewritten = PROTOCOL_RELATIVE_URL_RE.sub(replace_protocol_relative_url, rewritten)
+
+    def replace_root_relative_attr(match: re.Match[str]) -> str:
+        quoted_path = match.group('path')
+        quote_char = match.group('quote')
+        absolute = urljoin(base_url, f'/{quoted_path}')
+        try:
+            parsed = urlparse(absolute)
+        except ValueError:
+            return match.group(0)
+        if not _is_allowed_assist_host(parsed.hostname):
+            return match.group(0)
+        return f'{quote_char}{_build_assist_tunnel_url(absolute)}{quote_char}'
+
+    rewritten = ROOT_RELATIVE_ATTR_RE.sub(replace_root_relative_attr, rewritten)
+    if 'window.__spAssistProxyPatched' in rewritten:
+        return rewritten
+
+    assist_hosts = _parse_assist_allowed_hosts(back_settings.YOUTUBE_ASSIST_PROXY_ALLOWED_HOSTS)
+    hosts_js = ','.join(f'"{host}"' for host in assist_hosts)
+    bootstrap_script = f"""
+<script>
+(function() {{
+  if (window.__spAssistProxyPatched) return;
+  window.__spAssistProxyPatched = true;
+  const allowedHosts = [{hosts_js}];
+  const tunnelPrefix = '/api/youtube/assist/tunnel?url=';
+  function isAllowedHost(hostname) {{
+    if (!hostname) return false;
+    const host = String(hostname).toLowerCase();
+    return allowedHosts.some((allowed) => host === allowed || host.endsWith('.' + allowed));
+  }}
+  function toAbsoluteUrl(value) {{
+    if (typeof value !== 'string' || !value) return null;
+    if (value.startsWith(tunnelPrefix) || value.startsWith('data:') || value.startsWith('blob:')) return null;
+    if (value.startsWith('//')) return 'https:' + value;
+    if (value.startsWith('/')) return 'https://www.youtube.com' + value;
+    try {{
+      const parsed = new URL(value, window.location.origin);
+      return parsed.href;
+    }} catch (_err) {{
+      return null;
+    }}
+  }}
+  function rewriteUrl(value) {{
+    const absolute = toAbsoluteUrl(value);
+    if (!absolute) return value;
+    try {{
+      const parsed = new URL(absolute);
+      if (!isAllowedHost(parsed.hostname)) return value;
+      return tunnelPrefix + encodeURIComponent(parsed.href);
+    }} catch (_err) {{
+      return value;
+    }}
+  }}
+  const originalFetch = window.fetch;
+  window.fetch = function(input, init) {{
+    if (typeof input === 'string') {{
+      return originalFetch.call(this, rewriteUrl(input), init);
+    }}
+    if (input && typeof input.url === 'string') {{
+      const nextUrl = rewriteUrl(input.url);
+      if (nextUrl !== input.url) {{
+        const req = new Request(nextUrl, input);
+        return originalFetch.call(this, req, init);
+      }}
+    }}
+    return originalFetch.call(this, input, init);
+  }};
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {{
+    return originalOpen.apply(this, [method, rewriteUrl(url), ...Array.prototype.slice.call(arguments, 2)]);
+  }};
+}})();
+</script>
+"""
+    if '</head>' in rewritten:
+        rewritten = rewritten.replace('</head>', f'{bootstrap_script}</head>', 1)
+    else:
+        rewritten = f'{bootstrap_script}{rewritten}'
+    return rewritten
+
+
 def _is_forbidden_preview_host(host: str) -> bool:
     host_lower = host.lower().strip().strip('[]')
     if not host_lower:
@@ -274,10 +460,12 @@ def _resolve_chat_last_message_preview(last_message: str | None) -> str | None:
         return 'Photo'
     if content_type == 'video':
         return 'Video'
+    if content_type == 'voice':
+        return 'Voice message'
     return 'Document'
 
 
-def _serialize_watch_room(room) -> WatchRoomResponse:
+def _serialize_watch_room(room, *, youtube_access_mode: str = 'direct') -> WatchRoomResponse:
     viewer_ids = sorted(room.viewer_user_ids)
     viewer_sync_states = [
         WatchRoomViewerSyncStateResponse(
@@ -292,6 +480,7 @@ def _serialize_watch_room(room) -> WatchRoomResponse:
         id=room.id,
         chat_id=room.chat_id,
         youtube_video_id=room.youtube_video_id,
+        youtube_access_mode=youtube_access_mode,  # type: ignore[arg-type]
         host_user_id=room.host_user_id,
         viewer_user_ids=viewer_ids,
         viewer_count=len(viewer_ids),
@@ -327,6 +516,10 @@ def _serialize_watch_room_chat_message(message) -> WatchRoomChatMessageResponse:
         content=message.content,
         created_at=message.created_at,
     )
+
+
+def _serialize_message_deleted(*, chat_id: int, message_id: int) -> ChatMessageDeleteResponse:
+    return ChatMessageDeleteResponse(chat_id=chat_id, message_id=message_id)
 
 
 def _serialize_expense(expense) -> ExpenseResponse:
@@ -607,6 +800,131 @@ async def get_link_preview(
     )
 
 
+@router.get('/youtube/assist/embed/{video_id}')
+async def get_youtube_assist_embed(
+    video_id: str,
+    request: Request,
+    user: AuthUserDep,
+) -> RedirectResponse:
+    _ensure_assisted_enabled_for_user(user)
+    query_params = dict(request.query_params)
+    query_params.setdefault('autoplay', '0')
+    query_params.setdefault('rel', '0')
+    query_params.setdefault('playsinline', '1')
+    query_params.setdefault('enablejsapi', '0')
+    request_origin = request.headers.get('origin')
+    if request_origin:
+        query_params.setdefault('origin', request_origin)
+    target_url = f'https://www.youtube.com/embed/{quote(video_id, safe="")}'
+    if query_params:
+        target_url = f'{target_url}?{urlencode(query_params)}'
+    return RedirectResponse(url=_build_assist_tunnel_url(target_url), status_code=307)
+
+
+@router.api_route('/youtube/assist/tunnel', methods=['GET', 'POST', 'HEAD', 'OPTIONS'])
+async def tunnel_youtube_assist_resource(
+    request: Request,
+    user: AuthUserDep,
+    url: str = Query(...),
+    range_header: str | None = Header(default=None, alias='Range'),
+) -> Response:
+    _ensure_assisted_enabled_for_user(user)
+    try:
+        normalized_url = _normalize_assist_tunnel_url(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        parsed_url = urlparse(normalized_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid URL format') from exc
+    if not parsed_url.hostname:
+        raise HTTPException(status_code=400, detail='Invalid URL host')
+    if not _is_allowed_assist_host(parsed_url.hostname):
+        raise HTTPException(status_code=403, detail='Host is not allowed for assisted tunnel')
+
+    request_headers: dict[str, str] = {
+        'User-Agent': request.headers.get('user-agent', 'spmessenger-youtube-assist/1.0'),
+        'Accept': request.headers.get('accept', '*/*'),
+    }
+    if range_header:
+        request_headers['Range'] = range_header
+    for header_name in (
+        'content-type',
+        'origin',
+        'referer',
+        'accept-language',
+        'x-youtube-client-name',
+        'x-youtube-client-version',
+        'x-goog-visitor-id',
+        'x-goog-authuser',
+        'authorization',
+    ):
+        header_value = request.headers.get(header_name)
+        if header_value:
+            request_headers[header_name] = header_value
+
+    client = httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=back_settings.YOUTUBE_ASSIST_PROXY_TIMEOUT_SECONDS,
+    )
+    try:
+        request_content: bytes | None = None
+        if request.method in {'POST', 'PUT', 'PATCH'}:
+            request_content = await request.body()
+        request_obj = client.build_request(
+            request.method,
+            normalized_url,
+            headers=request_headers,
+            content=request_content,
+        )
+        upstream_response = await client.send(request_obj, stream=True)
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail='Failed to fetch upstream resource') from exc
+
+    upstream_content_type = upstream_response.headers.get('content-type', 'application/octet-stream')
+    forwarded_headers: dict[str, str] = {}
+    for header_name in ('cache-control', 'etag', 'last-modified', 'accept-ranges', 'content-range'):
+        header_value = upstream_response.headers.get(header_name)
+        if header_value:
+            forwarded_headers[header_name] = header_value
+
+    forwarded_headers['x-assisted-proxy'] = 'spmessenger'
+    forwarded_headers['x-assisted-target-host'] = parsed_url.hostname or ''
+
+    if _is_assist_text_content_type(upstream_content_type):
+        payload_bytes = await upstream_response.aread()
+        await upstream_response.aclose()
+        await client.aclose()
+        source_text = payload_bytes.decode(upstream_response.encoding or 'utf-8', errors='ignore')
+        rewritten_text = _rewrite_assist_proxy_text_payload(
+            source_text,
+            base_url=str(upstream_response.url),
+        )
+        forwarded_headers['content-type'] = upstream_content_type
+        return Response(
+            content=rewritten_text,
+            status_code=upstream_response.status_code,
+            headers=forwarded_headers,
+        )
+
+    async def stream_upstream_bytes():
+        try:
+            async for chunk in upstream_response.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream_response.aclose()
+            await client.aclose()
+
+    forwarded_headers['content-type'] = upstream_content_type
+    return StreamingResponse(
+        stream_upstream_bytes(),
+        status_code=upstream_response.status_code,
+        headers=forwarded_headers,
+    )
+
+
 async def _broadcast_watch_room_update(
     *,
     request: Request | WebSocket,
@@ -644,6 +962,24 @@ async def _broadcast_watch_room_chat_message(
         await ws_manager.send_to_user(user_id=user_id, payload=payload)
 
 
+async def _broadcast_message_deleted(
+    *,
+    request: Request | WebSocket,
+    messenger: MessengerServiceDep,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
+    participants = messenger.get_chat_participants(chat_id=chat_id)
+    payload = {
+        'type': 'message_deleted',
+        'chat_id': chat_id,
+        'message_id': message_id,
+    }
+    for participant in participants:
+        await ws_manager.send_to_user(user_id=participant.user_id, payload=payload)
+
+
 def _can_access_watch_room(room, user_id: int, messenger: MessengerServiceDep) -> bool:
     if user_id in room.viewer_user_ids:
         return True
@@ -669,7 +1005,12 @@ async def create_watch_room(
         host_user_id=user.id,
     )
     await _broadcast_watch_room_update(request=request, messenger=messenger, room=room)
-    return _serialize_watch_room(room)
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return _serialize_watch_room(room, youtube_access_mode=access_context.youtube_access_mode)
 
 
 @router.get('/watch-rooms/by-chat/{chat_id}')
@@ -684,7 +1025,12 @@ async def get_watch_room_by_chat(
     room = watch_rooms.find_room(chat_id=chat_id, youtube_video_id=youtube_video_id)
     if room is None:
         raise HTTPException(status_code=404, detail='Room not found')
-    return _serialize_watch_room(room)
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return _serialize_watch_room(room, youtube_access_mode=access_context.youtube_access_mode)
 
 
 @router.get('/watch-rooms/room/{room_id}')
@@ -697,7 +1043,12 @@ async def get_watch_room(
     room = watch_rooms.get_room(room_id)
     if not _can_access_watch_room(room, user.id, messenger):
         raise HTTPException(status_code=403, detail='Access denied')
-    return _serialize_watch_room(room)
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return _serialize_watch_room(room, youtube_access_mode=access_context.youtube_access_mode)
 
 
 @router.get('/watch-rooms/{room_id}/messages')
@@ -730,7 +1081,12 @@ async def join_watch_room(
         raise HTTPException(status_code=403, detail='Access denied')
     room = watch_rooms.join_room(room_id=room_id, user_id=user.id)
     await _broadcast_watch_room_update(request=request, messenger=messenger, room=room)
-    return _serialize_watch_room(room)
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return _serialize_watch_room(room, youtube_access_mode=access_context.youtube_access_mode)
 
 
 @router.post('/watch-rooms/{room_id}/leave')
@@ -747,7 +1103,12 @@ async def leave_watch_room(
     room = watch_rooms.leave_room(room_id=room_id, user_id=user.id)
     if watch_rooms.has_room(room.id):
         await _broadcast_watch_room_update(request=request, messenger=messenger, room=room)
-    return _serialize_watch_room(room)
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return _serialize_watch_room(room, youtube_access_mode=access_context.youtube_access_mode)
 
 
 @router.post('/watch-rooms/{room_id}/sync')
@@ -769,7 +1130,12 @@ async def sync_watch_room(
         is_playing=payload.is_playing,
     )
     await _broadcast_watch_room_update(request=request, messenger=messenger, room=room)
-    return _serialize_watch_room(room)
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return _serialize_watch_room(room, youtube_access_mode=access_context.youtube_access_mode)
 
 
 @router.post('/watch-rooms/{room_id}/invite')
@@ -831,7 +1197,12 @@ async def accept_watch_room_invite(
     invite = watch_rooms.accept_invite(invite_id=invite_id, user_id=user.id)
     room = watch_rooms.get_room(invite.room_id)
     await _broadcast_watch_room_update(request=request, messenger=messenger, room=room)
-    return _serialize_watch_room(room)
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return _serialize_watch_room(room, youtube_access_mode=access_context.youtube_access_mode)
 
 
 @router.post('/watch-rooms/invites/{invite_id}/decline')
@@ -1120,6 +1491,32 @@ async def send_chat_message(
     return _serialize_message(message, participant.id)
 
 
+@router.delete('/chats/{chat_id}/messages/{message_id}')
+async def delete_chat_message(
+    chat_id: int,
+    message_id: int,
+    request: Request,
+    user: AuthUserDep,
+    messenger: MessengerServiceDep,
+) -> ChatMessageDeleteResponse:
+    try:
+        deleted_message = messenger.delete_message(
+            chat_id=chat_id,
+            user_id=user.id,
+            message_id=message_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    await _broadcast_message_deleted(
+        request=request,
+        messenger=messenger,
+        chat_id=chat_id,
+        message_id=deleted_message.id,
+    )
+    return _serialize_message_deleted(chat_id=chat_id, message_id=deleted_message.id)
+
+
 @router.post('/chats/{chat_id}/pin')
 async def pin_chat(
     chat_id: int,
@@ -1289,3 +1686,4 @@ async def chats_socket(
                     messenger=messenger,
                     room=room,
                 )
+

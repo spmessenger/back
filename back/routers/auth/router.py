@@ -1,12 +1,13 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Cookie, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from back.deps.auth import AuthUserDep
 from back.deps.services.auth import AuthServiceDep
 from back.deps.services.storage import StorageServiceDep
 from back.misc.utils import set_access_token_cookie, set_refresh_token_cookie
+from back.services.youtube_access import list_tier_feature_descriptors, resolve_youtube_access_context_for_user
 from back.schemas import AvatarUpload
 
 router = APIRouter()
@@ -24,11 +25,37 @@ class ProfileResponse(BaseModel):
     id: int
     username: str
     avatar_url: str | None = None
+    subscription_tier: str = 'free'
+    youtube_access_mode: str = 'direct'
+    tier_features: list[str] = Field(default_factory=list)
+    youtube_assisted_enabled: bool = False
+    can_enable_assisted: bool = False
+
+
+class YouTubeAccessContextResponse(BaseModel):
+    subscription_tier: str
+    youtube_access_mode: str
+    tier_features: list[str]
+    youtube_assisted_enabled: bool
+    can_enable_assisted: bool
+
+
+class YouTubeAccessTierResponse(BaseModel):
+    tier: str
+    features: list[str]
 
 
 class ProfileUpdateRequest(BaseModel):
     username: str | None = None
     avatar: AvatarUpload | None = None
+
+
+class MockBillingCompleteRequest(BaseModel):
+    tier: str = 'premium'
+
+
+class YouTubeAssistToggleRequest(BaseModel):
+    enabled: bool
 
 
 @router.post('/login')
@@ -83,7 +110,112 @@ async def refresh(
 
 @router.get('/profile')
 def get_profile(user: AuthUserDep) -> ProfileResponse:
-    return ProfileResponse(id=user.id, username=user.username, avatar_url=user.avatar_url)
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return ProfileResponse(
+        id=user.id,
+        username=user.username,
+        avatar_url=user.avatar_url,
+        subscription_tier=access_context.subscription_tier,
+        youtube_access_mode=access_context.youtube_access_mode,
+        tier_features=list(access_context.tier_features),
+        youtube_assisted_enabled=access_context.youtube_assisted_enabled,
+        can_enable_assisted=access_context.can_enable_assisted,
+    )
+
+
+@router.get('/youtube-access/context')
+def get_youtube_access_context(user: AuthUserDep) -> YouTubeAccessContextResponse:
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    return YouTubeAccessContextResponse(
+        subscription_tier=access_context.subscription_tier,
+        youtube_access_mode=access_context.youtube_access_mode,
+        tier_features=list(access_context.tier_features),
+        youtube_assisted_enabled=access_context.youtube_assisted_enabled,
+        can_enable_assisted=access_context.can_enable_assisted,
+    )
+
+
+@router.post('/youtube-access/assisted-toggle')
+def set_youtube_assisted_toggle(
+    payload: YouTubeAssistToggleRequest,
+    user: AuthUserDep,
+    service: AuthServiceDep,
+) -> YouTubeAccessContextResponse:
+    access_context = resolve_youtube_access_context_for_user(
+        username=user.username,
+        persisted_tier=user.subscription_tier,
+        persisted_youtube_assisted_enabled=user.youtube_assisted_enabled,
+    )
+    if not access_context.can_enable_assisted:
+        if payload.enabled:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    'en': 'Assisted mode is available for premium tier when feature is enabled',
+                    'ru': 'Режим assisting доступен только для premium при включенной функции',
+                },
+            )
+        # Keep explicitly disabled state persisted for consistency.
+        updated_user = service.set_youtube_assisted_enabled(user.id, False)
+    else:
+        updated_user = service.set_youtube_assisted_enabled(user.id, payload.enabled)
+
+    updated_access_context = resolve_youtube_access_context_for_user(
+        username=updated_user.username,
+        persisted_tier=updated_user.subscription_tier,
+        persisted_youtube_assisted_enabled=updated_user.youtube_assisted_enabled,
+    )
+    return YouTubeAccessContextResponse(
+        subscription_tier=updated_access_context.subscription_tier,
+        youtube_access_mode=updated_access_context.youtube_access_mode,
+        tier_features=list(updated_access_context.tier_features),
+        youtube_assisted_enabled=updated_access_context.youtube_assisted_enabled,
+        can_enable_assisted=updated_access_context.can_enable_assisted,
+    )
+
+
+@router.get('/youtube-access/tiers')
+def get_youtube_access_tiers() -> list[YouTubeAccessTierResponse]:
+    return [
+        YouTubeAccessTierResponse(tier=descriptor.tier, features=list(descriptor.features))
+        for descriptor in list_tier_feature_descriptors()
+    ]
+
+
+@router.post('/billing/mock/complete')
+def complete_mock_billing(
+    payload: MockBillingCompleteRequest,
+    user: AuthUserDep,
+    service: AuthServiceDep,
+) -> ProfileResponse:
+    try:
+        updated_user = service.set_subscription_tier(user.id, payload.tier)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={'en': str(e), 'ru': 'Unsupported subscription tier'}) from e
+
+    access_context = resolve_youtube_access_context_for_user(
+        username=updated_user.username,
+        persisted_tier=updated_user.subscription_tier,
+        persisted_youtube_assisted_enabled=updated_user.youtube_assisted_enabled,
+    )
+    return ProfileResponse(
+        id=updated_user.id,
+        username=updated_user.username,
+        avatar_url=updated_user.avatar_url,
+        subscription_tier=access_context.subscription_tier,
+        youtube_access_mode=access_context.youtube_access_mode,
+        tier_features=list(access_context.tier_features),
+        youtube_assisted_enabled=access_context.youtube_assisted_enabled,
+        can_enable_assisted=access_context.can_enable_assisted,
+    )
 
 
 @router.patch('/profile')
@@ -128,8 +260,18 @@ def update_profile(
             detail={**AUTH_ERROR_DETAILS['user_exists'], 'en': message},
         ) from e
 
+    access_context = resolve_youtube_access_context_for_user(
+        username=updated_user.username,
+        persisted_tier=updated_user.subscription_tier,
+        persisted_youtube_assisted_enabled=updated_user.youtube_assisted_enabled,
+    )
     return ProfileResponse(
         id=updated_user.id,
         username=updated_user.username,
         avatar_url=updated_user.avatar_url,
+        subscription_tier=access_context.subscription_tier,
+        youtube_access_mode=access_context.youtube_access_mode,
+        tier_features=list(access_context.tier_features),
+        youtube_assisted_enabled=access_context.youtube_assisted_enabled,
+        can_enable_assisted=access_context.can_enable_assisted,
     )

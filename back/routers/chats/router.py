@@ -84,6 +84,12 @@ def _serialize_content_value(
     if not storage_key:
         storage_key = _extract_storage_key_from_download_url(payload.get('download_url'))
 
+    duration_seconds_raw = payload.get('duration_seconds')
+    try:
+        duration_seconds = float(duration_seconds_raw) if duration_seconds_raw is not None else None
+    except (TypeError, ValueError):
+        duration_seconds = None
+
     attachment = ChatAttachmentResponse(
         id=payload.get('attachment_id', ''),
         original_name=payload.get('original_name', 'attachment'),
@@ -91,6 +97,7 @@ def _serialize_content_value(
         size_bytes=int(payload.get('size_bytes', 0) or 0),
         download_url=payload.get('download_url'),
         status=payload.get('status', 'ready'),
+        duration_seconds=duration_seconds,
     )
     content_type = payload.get('content_type', 'document')
     caption = payload.get('caption', '')
@@ -139,6 +146,7 @@ def _make_attachment_content(
     attachment_group_id: str | None,
     content_type: str,
     caption: str,
+    duration_seconds: float | None = None,
 ) -> str:
     payload = {
         'attachment_id': attachment_id,
@@ -151,6 +159,7 @@ def _make_attachment_content(
         'status': 'ready',
         'content_type': content_type,
         'caption': caption,
+        'duration_seconds': duration_seconds,
     }
     return f'{ATTACHMENT_CONTENT_PREFIX}{json.dumps(payload)}'
 
@@ -1365,7 +1374,10 @@ async def complete_chat_attachment(
     messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
     _ = payload  # reserved for future checksum verification
     try:
-        record = storage.complete_attachment_upload(attachment_id)
+        record = storage.complete_attachment_upload(
+            attachment_id,
+            duration_seconds=payload.duration_seconds,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1377,6 +1389,7 @@ async def complete_chat_attachment(
         status=record.status,  # type: ignore[arg-type]
         mime_type=record.mime_type,
         size_bytes=record.size_bytes,
+        duration_seconds=record.duration_seconds,
     )
 
 
@@ -1476,6 +1489,7 @@ async def send_chat_message(
             attachment_group_id=payload.attachment_group_id,
             content_type=payload.content_type or 'document',
             caption=payload.content,
+            duration_seconds=record.duration_seconds,
         )
 
     try:

@@ -38,6 +38,7 @@ class ChatAttachmentResponse(BaseModel):
     size_bytes: int
     download_url: str | None = None
     status: Literal['pending', 'ready', 'failed'] = 'ready'
+    duration_seconds: float | None = None
 
 
 class ChatMessageResponse(BaseModel):
@@ -127,6 +128,7 @@ class AttachmentInitResponse(BaseModel):
 
 class AttachmentCompleteRequest(BaseModel):
     sha256: str | None = None
+    duration_seconds: float | None = None
 
 
 class AttachmentCompleteResponse(BaseModel):
@@ -134,6 +136,7 @@ class AttachmentCompleteResponse(BaseModel):
     status: Literal['pending', 'ready', 'failed']
     mime_type: str
     size_bytes: int
+    duration_seconds: float | None = None
 
 
 class AttachmentDownloadResponse(BaseModel):

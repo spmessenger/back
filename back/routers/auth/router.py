@@ -1,6 +1,4 @@
-from typing import Annotated
-
-from fastapi import APIRouter, Body, Cookie, HTTPException, Response
+from fastapi import APIRouter, Cookie, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from back.deps.auth import AuthUserDep
@@ -15,6 +13,9 @@ router = APIRouter()
 AUTH_ERROR_DETAILS = {
     'user_not_found': {'ru': 'User not found', 'en': 'User not found'},
     'user_exists': {'ru': 'User with such username already exists', 'en': 'User with such username already exists'},
+    'email_exists': {'ru': 'User with such email already exists', 'en': 'User with such email already exists'},
+    'invalid_email': {'ru': 'Invalid email', 'en': 'Invalid email'},
+    'invalid_verification_code': {'ru': 'Invalid verification code', 'en': 'Invalid verification code'},
     'token_not_found': {'ru': 'Token not found', 'en': 'Token not found'},
     'invalid_avatar': {'ru': 'Incorrect avatar image', 'en': 'Incorrect avatar image'},
     'username_empty': {'ru': 'Username cannot be empty', 'en': 'Username cannot be empty'},
@@ -58,16 +59,30 @@ class YouTubeAssistToggleRequest(BaseModel):
     enabled: bool
 
 
+class LoginRequest(BaseModel):
+    email: str
+    verification_code: str
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    verification_code: str
+
+
 @router.post('/login')
 def login(
-    username: Annotated[str, Body(embed=False)],
-    password: Annotated[str, Body(embed=False)],
+    payload: LoginRequest,
     service: AuthServiceDep,
     response: Response,
 ):
     try:
-        _, auth = service.login(username, password)
+        _, auth = service.login(str(payload.email), payload.verification_code)
     except ValueError as e:
+        message = str(e)
+        if message == 'Incorrect verification code':
+            raise HTTPException(status_code=401, detail=AUTH_ERROR_DETAILS['invalid_verification_code']) from e
+        if message == 'Invalid email':
+            raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['invalid_email']) from e
         raise HTTPException(status_code=404, detail=AUTH_ERROR_DETAILS['user_not_found']) from e
 
     set_access_token_cookie(response, auth)
@@ -77,15 +92,19 @@ def login(
 
 @router.post('/register')
 async def register(
-    username: Annotated[str, Body(embed=False)],
-    password: Annotated[str, Body(embed=False)],
+    payload: RegisterRequest,
     service: AuthServiceDep,
     response: Response,
 ):
     try:
-        _, private_chat, auth = service.register(username, password)
+        _, private_chat, auth = service.register(str(payload.email), payload.verification_code)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['user_exists']) from e
+        message = str(e)
+        if message == 'Incorrect verification code':
+            raise HTTPException(status_code=401, detail=AUTH_ERROR_DETAILS['invalid_verification_code']) from e
+        if message == 'Invalid email':
+            raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['invalid_email']) from e
+        raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['email_exists']) from e
 
     set_access_token_cookie(response, auth)
     set_refresh_token_cookie(response, auth)

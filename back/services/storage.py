@@ -37,6 +37,7 @@ class AttachmentRecord:
     status: str
     created_at: float
     local_path: str | None = None
+    duration_ms: int | None = None
     duration_seconds: float | None = None
 
 
@@ -111,16 +112,25 @@ class S3StorageService:
         self,
         attachment_id: str,
         *,
+        duration_ms: int | None = None,
         duration_seconds: float | None = None,
     ) -> AttachmentRecord:
         record = self._attachments_registry.get(attachment_id)
         if record is None:
             raise ValueError('Attachment not found')
 
+        if duration_ms is not None:
+            if duration_ms < 0:
+                raise ValueError('Attachment duration must be non-negative')
+            record.duration_ms = duration_ms
+            record.duration_seconds = duration_ms / 1000
+
         if duration_seconds is not None:
             if duration_seconds < 0:
                 raise ValueError('Attachment duration must be non-negative')
-            record.duration_seconds = duration_seconds
+            if record.duration_ms is None:
+                record.duration_seconds = duration_seconds
+                record.duration_ms = round(duration_seconds * 1000)
 
         if record.local_path is not None:
             if not Path(record.local_path).exists():

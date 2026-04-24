@@ -29,7 +29,7 @@ def client():
 
 @pytest.fixture(scope='function')
 def auth_client(client: TestClient):
-    resp = client.post('/api/register', json={'username': 'test', 'password': 'test'})
+    resp = client.post('/api/register', json={'email': 'test@example.com', 'verification_code': '0000'})
     resp_json = resp.json()
     client = AuthTestClient(app, cookies={'access_token': resp_json['auth']['access_token']})
     return client

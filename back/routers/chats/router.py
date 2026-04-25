@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import ipaddress
 import re
+import time
 from html import unescape
 from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 import httpx
@@ -17,6 +18,7 @@ from back.deps.repos.user import UserRepoDep
 from back.deps.services.messenger import MessengerServiceDep
 from back.deps.services.watch_room import WatchRoomServiceDep
 from back.deps.services.expense_split import ExpenseSplitServiceDep
+from back.deps.services.live_location import LiveLocationServiceDep
 from back.settings import settings as back_settings
 from back.services.ws_manager import WebSocketConnectionManager
 from back.services.youtube_access import resolve_youtube_access_context_for_user
@@ -544,6 +546,21 @@ def _serialize_message_deleted(*, chat_id: int, message_id: int) -> ChatMessageD
     return ChatMessageDeleteResponse(chat_id=chat_id, message_id=message_id)
 
 
+def _serialize_live_location_share(share) -> dict:
+    return {
+        'chat_id': share.chat_id,
+        'user_id': share.user_id,
+        'username': share.username,
+        'avatar_url': share.avatar_url,
+        'latitude': share.latitude,
+        'longitude': share.longitude,
+        'accuracy_meters': share.accuracy_meters,
+        'started_at': share.started_at,
+        'updated_at': share.updated_at,
+        'expires_at': share.expires_at,
+    }
+
+
 def _serialize_expense(expense) -> ExpenseResponse:
     shares = [
         ExpenseParticipantShareResponse(user_id=user_id, share_minor=share_minor)
@@ -1000,6 +1017,66 @@ async def _broadcast_message_deleted(
     }
     for participant in participants:
         await ws_manager.send_to_user(user_id=participant.user_id, payload=payload)
+
+
+async def _broadcast_live_location_update(
+    *,
+    request: Request | WebSocket,
+    messenger: MessengerServiceDep,
+    share,
+) -> None:
+    ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
+    participants = messenger.get_chat_participants(chat_id=share.chat_id)
+    payload = {
+        'type': 'live_location_updated',
+        'share': _serialize_live_location_share(share),
+    }
+    for participant in participants:
+        await ws_manager.send_to_user(user_id=participant.user_id, payload=payload)
+
+
+async def _broadcast_live_location_stopped(
+    *,
+    request: Request | WebSocket,
+    messenger: MessengerServiceDep,
+    share,
+    reason: str,
+) -> None:
+    ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
+    participants = messenger.get_chat_participants(chat_id=share.chat_id)
+    payload = {
+        'type': 'live_location_stopped',
+        'chat_id': share.chat_id,
+        'user_id': share.user_id,
+        'username': share.username,
+        'reason': reason,
+    }
+    for participant in participants:
+        await ws_manager.send_to_user(user_id=participant.user_id, payload=payload)
+
+
+async def _emit_live_location_stopped_message(
+    *,
+    request: Request | WebSocket,
+    messenger: MessengerServiceDep,
+    share,
+) -> None:
+    ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
+    sent_message = messenger.send_message(
+        chat_id=share.chat_id,
+        sender_id=share.user_id,
+        content='Пользователь перестал делиться местоположением',
+    )
+    participants = messenger.get_chat_participants(chat_id=share.chat_id)
+    for participant in participants:
+        serialized_message = _serialize_message(sent_message, participant.id).model_dump()
+        await ws_manager.send_to_user(
+            user_id=participant.user_id,
+            payload={
+                'type': 'message',
+                'message': serialized_message,
+            },
+        )
 
 
 def _can_access_watch_room(room, user_id: int, messenger: MessengerServiceDep) -> bool:
@@ -1572,6 +1649,7 @@ async def chats_socket(
     secret_key: SecretKeyDep,
     messenger: MessengerServiceDep,
     watch_rooms: WatchRoomServiceDep,
+    live_locations: LiveLocationServiceDep,
 ):
     access_token = websocket.cookies.get('access_token')
     try:
@@ -1602,6 +1680,23 @@ async def chats_socket(
                 continue
 
             try:
+                expired_shares = live_locations.pop_expired_shares(
+                    chat_id=request.chat_id,
+                    now=time.time(),
+                )
+                for expired_share in expired_shares:
+                    await _broadcast_live_location_stopped(
+                        request=websocket,
+                        messenger=messenger,
+                        share=expired_share,
+                        reason='expired',
+                    )
+                    await _emit_live_location_stopped_message(
+                        request=websocket,
+                        messenger=messenger,
+                        share=expired_share,
+                    )
+
                 if request.action == 'get_messages':
                     participant, messages, has_more = messenger.get_chat_messages_page(
                         chat_id=request.chat_id,
@@ -1658,6 +1753,58 @@ async def chats_socket(
                     )
                     continue
 
+                if request.action == 'live_location_start':
+                    messenger.get_chat_participant(chat_id=request.chat_id, user_id=user.id)
+                    share = live_locations.upsert_share(
+                        chat_id=request.chat_id,
+                        user_id=user.id,
+                        username=user.username,
+                        avatar_url=user.avatar_url,
+                        latitude=float(request.latitude or 0.0),
+                        longitude=float(request.longitude or 0.0),
+                        accuracy_meters=request.accuracy_meters,
+                        expires_at=request.expires_at_timestamp,
+                    )
+                    await _broadcast_live_location_update(
+                        request=websocket,
+                        messenger=messenger,
+                        share=share,
+                    )
+                    continue
+
+                if request.action == 'live_location_update':
+                    messenger.get_chat_participant(chat_id=request.chat_id, user_id=user.id)
+                    share = live_locations.update_share(
+                        chat_id=request.chat_id,
+                        user_id=user.id,
+                        latitude=float(request.latitude or 0.0),
+                        longitude=float(request.longitude or 0.0),
+                        accuracy_meters=request.accuracy_meters,
+                    )
+                    await _broadcast_live_location_update(
+                        request=websocket,
+                        messenger=messenger,
+                        share=share,
+                    )
+                    continue
+
+                if request.action == 'live_location_stop':
+                    messenger.get_chat_participant(chat_id=request.chat_id, user_id=user.id)
+                    stopped_share = live_locations.stop_share(chat_id=request.chat_id, user_id=user.id)
+                    if stopped_share is not None:
+                        await _broadcast_live_location_stopped(
+                            request=websocket,
+                            messenger=messenger,
+                            share=stopped_share,
+                            reason='stopped',
+                        )
+                        await _emit_live_location_stopped_message(
+                            request=websocket,
+                            messenger=messenger,
+                            share=stopped_share,
+                        )
+                    continue
+
                 sent_message = messenger.send_message(
                     chat_id=request.chat_id,
                     sender_id=user.id,
@@ -1709,6 +1856,19 @@ async def chats_socket(
     except WebSocketDisconnect:
         ws_manager.disconnect(user_id=user.id, websocket=websocket)
         if not ws_manager.has_user_connections(user.id):
+            stopped_shares = live_locations.stop_all_for_user(user_id=user.id)
+            for stopped_share in stopped_shares:
+                await _broadcast_live_location_stopped(
+                    request=websocket,
+                    messenger=messenger,
+                    share=stopped_share,
+                    reason='disconnected',
+                )
+                await _emit_live_location_stopped_message(
+                    request=websocket,
+                    messenger=messenger,
+                    share=stopped_share,
+                )
             changed_rooms = watch_rooms.leave_user_from_all_rooms(user.id)
             for room in changed_rooms:
                 await _broadcast_watch_room_update(

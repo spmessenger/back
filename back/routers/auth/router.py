@@ -15,7 +15,8 @@ AUTH_ERROR_DETAILS = {
     'user_exists': {'ru': 'User with such username already exists', 'en': 'User with such username already exists'},
     'email_exists': {'ru': 'User with such email already exists', 'en': 'User with such email already exists'},
     'invalid_email': {'ru': 'Invalid email', 'en': 'Invalid email'},
-    'invalid_verification_code': {'ru': 'Invalid verification code', 'en': 'Invalid verification code'},
+    'password_empty': {'ru': 'Password cannot be empty', 'en': 'Password cannot be empty'},
+    'invalid_password': {'ru': 'Invalid password', 'en': 'Invalid password'},
     'token_not_found': {'ru': 'Token not found', 'en': 'Token not found'},
     'invalid_avatar': {'ru': 'Incorrect avatar image', 'en': 'Incorrect avatar image'},
     'username_empty': {'ru': 'Username cannot be empty', 'en': 'Username cannot be empty'},
@@ -25,6 +26,7 @@ AUTH_ERROR_DETAILS = {
 class ProfileResponse(BaseModel):
     id: int
     username: str
+    email: str | None = None
     avatar_url: str | None = None
     subscription_tier: str = 'free'
     youtube_access_mode: str = 'direct'
@@ -48,6 +50,7 @@ class YouTubeAccessTierResponse(BaseModel):
 
 class ProfileUpdateRequest(BaseModel):
     username: str | None = None
+    email: str | None = None
     avatar: AvatarUpload | None = None
 
 
@@ -60,13 +63,13 @@ class YouTubeAssistToggleRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str
-    verification_code: str
+    username: str
+    password: str
 
 
 class RegisterRequest(BaseModel):
-    email: str
-    verification_code: str
+    username: str
+    password: str
 
 
 @router.post('/login')
@@ -76,13 +79,15 @@ def login(
     response: Response,
 ):
     try:
-        _, auth = service.login(str(payload.email), payload.verification_code)
+        _, auth = service.login(payload.username, payload.password)
     except ValueError as e:
         message = str(e)
-        if message == 'Incorrect verification code':
-            raise HTTPException(status_code=401, detail=AUTH_ERROR_DETAILS['invalid_verification_code']) from e
-        if message == 'Invalid email':
-            raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['invalid_email']) from e
+        if message == 'Password cannot be empty':
+            raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['password_empty']) from e
+        if message == 'Incorrect password':
+            raise HTTPException(status_code=401, detail=AUTH_ERROR_DETAILS['invalid_password']) from e
+        if message == 'Username cannot be empty':
+            raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['username_empty']) from e
         raise HTTPException(status_code=404, detail=AUTH_ERROR_DETAILS['user_not_found']) from e
 
     set_access_token_cookie(response, auth)
@@ -97,14 +102,14 @@ async def register(
     response: Response,
 ):
     try:
-        _, private_chat, auth = service.register(str(payload.email), payload.verification_code)
+        _, private_chat, auth = service.register(payload.username, payload.password)
     except ValueError as e:
         message = str(e)
-        if message == 'Incorrect verification code':
-            raise HTTPException(status_code=401, detail=AUTH_ERROR_DETAILS['invalid_verification_code']) from e
-        if message == 'Invalid email':
-            raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['invalid_email']) from e
-        raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['email_exists']) from e
+        if message == 'Password cannot be empty':
+            raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['password_empty']) from e
+        if message == 'Username cannot be empty':
+            raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['username_empty']) from e
+        raise HTTPException(status_code=400, detail=AUTH_ERROR_DETAILS['user_exists']) from e
 
     set_access_token_cookie(response, auth)
     set_refresh_token_cookie(response, auth)
@@ -137,6 +142,7 @@ def get_profile(user: AuthUserDep) -> ProfileResponse:
     return ProfileResponse(
         id=user.id,
         username=user.username,
+        email=user.email,
         avatar_url=user.avatar_url,
         subscription_tier=access_context.subscription_tier,
         youtube_access_mode=access_context.youtube_access_mode,
@@ -228,6 +234,7 @@ def complete_mock_billing(
     return ProfileResponse(
         id=updated_user.id,
         username=updated_user.username,
+        email=updated_user.email,
         avatar_url=updated_user.avatar_url,
         subscription_tier=access_context.subscription_tier,
         youtube_access_mode=access_context.youtube_access_mode,
@@ -264,6 +271,7 @@ def update_profile(
         updated_user = service.update_profile(
             user.id,
             username=payload.username if payload.username is not None else user.username,
+            email=payload.email if payload.email is not None else user.email,
             avatar_url=avatar_url,
         )
     except ValueError as e:
@@ -272,6 +280,11 @@ def update_profile(
             raise HTTPException(
                 status_code=400,
                 detail={**AUTH_ERROR_DETAILS['username_empty'], 'en': message},
+            ) from e
+        if message == 'Invalid email':
+            raise HTTPException(
+                status_code=400,
+                detail={**AUTH_ERROR_DETAILS['invalid_email'], 'en': message},
             ) from e
 
         raise HTTPException(
@@ -287,6 +300,7 @@ def update_profile(
     return ProfileResponse(
         id=updated_user.id,
         username=updated_user.username,
+        email=updated_user.email,
         avatar_url=updated_user.avatar_url,
         subscription_tier=access_context.subscription_tier,
         youtube_access_mode=access_context.youtube_access_mode,

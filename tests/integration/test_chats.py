@@ -84,7 +84,7 @@ def test_create_group(client: AuthTestClient):
 def test_unread_messages_counter_updates_and_clears(client: AuthTestClient):
     other_client = TestClient(app)
     register_resp = other_client.post(
-        '/api/register', json={'email': 'test2@example.com', 'verification_code': '0000'}
+        '/api/register', json={'username': 'test2', 'password': 'secret123'}
     )
     register_payload = register_resp.json()
     second_user_client = AuthTestClient(

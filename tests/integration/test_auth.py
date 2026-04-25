@@ -3,7 +3,7 @@ from tests.conftest import client, TestClient
 
 
 def test_register(client: TestClient):
-    response = client.post('/api/register', json={'email': 'test@example.com', 'verification_code': '0000'})
+    response = client.post('/api/register', json={'username': 'test', 'password': 'secret123'})
 
     assert response.status_code == 200
     resp_json = response.json()
@@ -13,8 +13,8 @@ def test_register(client: TestClient):
 
 
 def test_login(client: TestClient):
-    client.post('/api/register', json={'email': 'test@example.com', 'verification_code': '0000'})
-    response = client.post('/api/login', json={'email': 'test@example.com', 'verification_code': '0000'})
+    client.post('/api/register', json={'username': 'test', 'password': 'secret123'})
+    response = client.post('/api/login', json={'username': 'test', 'password': 'secret123'})
 
     assert response.status_code == 200
     resp_json = response.json()
@@ -36,7 +36,7 @@ def test_update_profile(auth_client: TestClient):
 
 
 def test_update_profile_rejects_duplicate_username(client: TestClient, auth_client: TestClient):
-    client.post('/api/register', json={'email': 'taken@example.com', 'verification_code': '0000'})
+    client.post('/api/register', json={'username': 'taken', 'password': 'secret123'})
 
     response = auth_client.patch('/api/profile', json={'username': 'taken'})
 

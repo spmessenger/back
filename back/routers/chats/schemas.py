@@ -66,7 +66,15 @@ class ChatMessageDeleteResponse(BaseModel):
 
 
 class WsChatActionRequest(BaseModel):
-    action: Literal['get_messages', 'send_message', 'watch_room_playback', 'watch_room_chat_send']
+    action: Literal[
+        'get_messages',
+        'send_message',
+        'watch_room_playback',
+        'watch_room_chat_send',
+        'live_location_start',
+        'live_location_update',
+        'live_location_stop',
+    ]
     chat_id: int
     content: str | None = None
     reference_message_id: int | None = None
@@ -77,6 +85,10 @@ class WsChatActionRequest(BaseModel):
     room_id: str | None = None
     current_time_seconds: float | None = None
     is_playing: bool | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    accuracy_meters: float | None = None
+    expires_at_timestamp: float | None = None
 
     @model_validator(mode='after')
     def validate_content_for_send(self) -> 'WsChatActionRequest':
@@ -94,6 +106,17 @@ class WsChatActionRequest(BaseModel):
                 raise ValueError('room_id is required for watch_room_chat_send action')
             if not self.content:
                 raise ValueError('content is required for watch_room_chat_send action')
+        if self.action in {'live_location_start', 'live_location_update'}:
+            if self.latitude is None:
+                raise ValueError('latitude is required for live_location actions')
+            if self.longitude is None:
+                raise ValueError('longitude is required for live_location actions')
+            if self.latitude < -90 or self.latitude > 90:
+                raise ValueError('latitude out of range')
+            if self.longitude < -180 or self.longitude > 180:
+                raise ValueError('longitude out of range')
+            if self.accuracy_meters is not None and self.accuracy_meters < 0:
+                raise ValueError('accuracy_meters must be non-negative')
         return self
 
 

@@ -13,7 +13,9 @@ from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
 from PIL import Image
 
-from back.settings import settings
+from back.settings import get_settings
+
+settings = get_settings()
 
 
 def _parse_data_url(data_url: str) -> tuple[str, bytes]:
@@ -43,7 +45,8 @@ class AttachmentRecord:
 
 class S3StorageService:
     _attachments_registry: dict[str, AttachmentRecord] = {}
-    _local_attachments_root = Path(__file__).resolve().parents[2] / '.local_attachments'
+    _local_attachments_root = Path(
+        __file__).resolve().parents[2] / '.local_attachments'
 
     def __init__(self, client: BaseClient | None = None):
         self.client = client
@@ -173,7 +176,8 @@ class S3StorageService:
             raise ValueError('Attachment body is empty')
         record.size_bytes = received_size
 
-        resolved_content_type = (content_type or record.mime_type or 'application/octet-stream').strip()
+        resolved_content_type = (
+            content_type or record.mime_type or 'application/octet-stream').strip()
         try:
             self._get_client().put_object(
                 Bucket=settings.S3_BUCKET_NAME,
@@ -302,7 +306,8 @@ class S3StorageService:
         src_size = max(1, round(crop_size / render_scale))
         src_size = min(src_size, image.width - src_x, image.height - src_y)
 
-        cropped = image.crop((src_x, src_y, src_x + src_size, src_y + src_size))
+        cropped = image.crop(
+            (src_x, src_y, src_x + src_size, src_y + src_size))
         cropped = cropped.resize((280, 280), Image.Resampling.LANCZOS)
 
         buffer = BytesIO()

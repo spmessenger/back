@@ -19,7 +19,7 @@ from back.deps.services.messenger import MessengerServiceDep
 from back.deps.services.watch_room import WatchRoomServiceDep
 from back.deps.services.expense_split import ExpenseSplitServiceDep
 from back.deps.services.live_location import LiveLocationServiceDep
-from back.settings import settings as back_settings
+from back.settings import get_settings
 from back.services.ws_manager import WebSocketConnectionManager
 from back.services.youtube_access import resolve_youtube_access_context_for_user
 from back.deps.services.storage import StorageServiceDep
@@ -57,6 +57,7 @@ from .schemas import (
     WsChatActionRequest,
 )
 
+back_settings = get_settings()
 router = APIRouter(tags=['Chats'])
 ATTACHMENT_CONTENT_PREFIX = '__attachment_v1__:'
 META_TAG_RE = re.compile(r'<meta[^>]+>', re.IGNORECASE)
@@ -780,7 +781,12 @@ async def get_chat_groups(
 ) -> list[ChatGroupResponse]:
     groups = messenger.get_chat_groups(user_id=user.id)
     return [
-        ChatGroupResponse(id=group.id, title=group.title, chat_ids=group.chat_ids)
+        ChatGroupResponse(
+            id=group.id,
+            title=group.title,
+            chat_ids=group.chat_ids,
+            unread_messages_count=group.unread_messages_count,
+        )
         for group in groups
     ]
 
@@ -1062,9 +1068,11 @@ async def _emit_live_location_stopped_message(
     share,
 ) -> None:
     ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
+    connected_user_ids = ws_manager.get_connected_user_ids_for_chat(share.chat_id)
     sent_message = messenger.send_message(
         chat_id=share.chat_id,
         sender_id=share.user_id,
+        connected_user_ids=connected_user_ids,
         content='Пользователь перестал делиться местоположением',
     )
     participants = messenger.get_chat_participants(chat_id=share.chat_id)
@@ -1336,7 +1344,12 @@ async def replace_chat_groups(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return [
-        ChatGroupResponse(id=group.id, title=group.title, chat_ids=group.chat_ids)
+        ChatGroupResponse(
+            id=group.id,
+            title=group.title,
+            chat_ids=group.chat_ids,
+            unread_messages_count=group.unread_messages_count,
+        )
         for group in groups
     ]
 
@@ -1547,6 +1560,7 @@ async def get_chat_attachment_content(
 
 @router.post('/chats/{chat_id}/messages')
 async def send_chat_message(
+    request: Request,
     chat_id: int,
     user: AuthUserDep,
     messenger: MessengerServiceDep,
@@ -1586,12 +1600,15 @@ async def send_chat_message(
         )
 
     try:
+        ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
+        connected_user_ids = ws_manager.get_connected_user_ids_for_chat(chat_id)
         message = messenger.send_message(
             chat_id,
             user.id,
             content,
             reference_message_id=payload.reference_message_id,
             forwarded_from_message_id=payload.forwarded_from_message_id,
+            connected_user_ids=connected_user_ids,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1698,6 +1715,11 @@ async def chats_socket(
                     )
 
                 if request.action == 'get_messages':
+                    ws_manager.set_active_chat(
+                        user_id=user.id,
+                        websocket=websocket,
+                        chat_id=request.chat_id,
+                    )
                     participant, messages, has_more = messenger.get_chat_messages_page(
                         chat_id=request.chat_id,
                         user_id=user.id,
@@ -1805,12 +1827,14 @@ async def chats_socket(
                         )
                     continue
 
+                connected_user_ids = ws_manager.get_connected_user_ids_for_chat(request.chat_id)
                 sent_message = messenger.send_message(
                     chat_id=request.chat_id,
                     sender_id=user.id,
                     content=request.content or '',
                     reference_message_id=request.reference_message_id,
                     forwarded_from_message_id=request.forwarded_from_message_id,
+                    connected_user_ids=connected_user_ids,
                 )
                 sender_participant = messenger.get_chat_participant(
                     chat_id=request.chat_id,

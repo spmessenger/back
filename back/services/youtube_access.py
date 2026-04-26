@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
-from back.settings import settings
+from back.settings import get_settings
+
+settings = get_settings()
 
 TierName = str
 

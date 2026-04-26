@@ -3,12 +3,13 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from db.session import ping_connection
-from db.settings import settings, DatabaseTypeEnum
+from db.settings import get_settings, DatabaseTypeEnum
 from db.misc import create_tables, drop_tables, ensure_tables_exist
 from .services.ws_manager import WebSocketConnectionManager
 from .services.storage import S3StorageService
 from .router import base_router
 
+settings = get_settings()
 logger = logging.getLogger('uvicorn.error')
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
@@ -28,7 +29,8 @@ async def lifespan(app: FastAPI):
     if app.state.s3_available:
         logger.info('S3/MinIO connection is available at startup.')
     else:
-        logger.warning('S3/MinIO is not reachable at startup. Local attachment fallback will be used.')
+        logger.warning(
+            'S3/MinIO is not reachable at startup. Local attachment fallback will be used.')
 
     yield
     if settings.DB_TYPE == DatabaseTypeEnum.IN_MEMORY:

@@ -124,6 +124,7 @@ class ChatGroupResponse(BaseModel):
     id: int
     title: str
     chat_ids: list[int]
+    unread_messages_count: int = 0
 
 
 class ChatGroupReplaceItem(BaseModel):

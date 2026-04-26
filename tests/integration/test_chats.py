@@ -120,6 +120,40 @@ def test_unread_messages_counter_updates_and_clears(client: AuthTestClient):
     assert dialog_chat_after_read['unread_messages_count'] == 0
 
 
+def test_unread_counter_does_not_increase_for_user_connected_to_chat_room(client: AuthTestClient):
+    other_client = TestClient(app)
+    register_resp = other_client.post(
+        '/api/register', json={'username': 'test2', 'password': 'secret123'}
+    )
+    register_payload = register_resp.json()
+    second_user_client = AuthTestClient(
+        app, cookies={'access_token': register_payload['auth']['access_token']}
+    )
+
+    second_user_id = second_user_client.get_user_id()
+    current_user_id = client.get_user_id()
+
+    create_dialog_resp = client.post(
+        '/api/chats/dialog', json={'participant_id': second_user_id}
+    )
+    chat_id = create_dialog_resp.json()['chat']['id']
+    second_user_client.post('/api/chats/dialog', json={'participant_id': current_user_id})
+
+    with second_user_client.websocket_connect('/api/ws/chats') as websocket:
+        websocket.send_json({'action': 'get_messages', 'chat_id': chat_id})
+        payload = websocket.receive_json()
+        assert payload['type'] == 'messages'
+        assert payload['chat_id'] == chat_id
+
+        client.post(f'/api/chats/{chat_id}/messages', json={'content': 'hello while connected'})
+        websocket.receive_json()
+
+    chats_resp = second_user_client.get('/api/chats')
+    chats_payload = chats_resp.json()
+    dialog_chat = next(chat for chat in chats_payload if chat['id'] == chat_id)
+    assert dialog_chat['unread_messages_count'] == 0
+
+
 def test_get_chats_contains_last_message_preview(client: AuthTestClient):
     send_message_resp = client.post('/api/chats/1/messages', json={'content': 'hello reload'})
     assert send_message_resp.status_code == 200

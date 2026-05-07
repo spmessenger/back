@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Cookie, HTTPException, Response
+from fastapi import APIRouter, Cookie, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from back.deps.auth import AuthUserDep
@@ -120,10 +120,15 @@ async def register(
 async def refresh(
     service: AuthServiceDep,
     response: Response,
-    refresh_token: str = Cookie(),
+    refresh_token: str | None = Cookie(None),
+    x_refresh_token: str | None = Header(None),
 ):
+    token = refresh_token or x_refresh_token
+    if token is None:
+        raise HTTPException(status_code=401, detail=AUTH_ERROR_DETAILS['token_not_found'])
+
     try:
-        auth = service.refresh_token(refresh_token)
+        auth = service.refresh_token(token)
     except ValueError as e:
         raise HTTPException(status_code=401, detail=AUTH_ERROR_DETAILS['token_not_found']) from e
 

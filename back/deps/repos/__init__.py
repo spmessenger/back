@@ -3,6 +3,7 @@ from .chat_group import ChatGroupRepoDep
 from .message import MessageRepoDep
 from .participant import ParticipantRepoDep
 from .user import UserRepoDep
+from .room import YouTubeRoomRepoDep
 
 __all__ = [
     'UserRepoDep',
@@ -10,4 +11,5 @@ __all__ = [
     'ChatGroupRepoDep',
     'MessageRepoDep',
     'ParticipantRepoDep',
+    'YouTubeRoomRepoDep',
 ]

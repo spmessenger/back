@@ -64,8 +64,10 @@ META_TAG_RE = re.compile(r'<meta[^>]+>', re.IGNORECASE)
 ATTR_RE = re.compile(r'([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*([\'"])(.*?)\2')
 TITLE_RE = re.compile(r'<title[^>]*>(.*?)</title>', re.IGNORECASE | re.DOTALL)
 ABSOLUTE_URL_RE = re.compile(r'https?://[^\s"\'<>]+', re.IGNORECASE)
-PROTOCOL_RELATIVE_URL_RE = re.compile(r'(?P<prefix>["\'(=,:\s])//(?P<host>[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(?P<path>/[^\s"\'<>]*)?')
-ROOT_RELATIVE_ATTR_RE = re.compile(r'(?P<quote>["\'])/(?P<path>(?!/)[^"\']+)(?P=quote)')
+PROTOCOL_RELATIVE_URL_RE = re.compile(
+    r'(?P<prefix>["\'(=,:\s])//(?P<host>[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(?P<path>/[^\s"\'<>]*)?')
+ROOT_RELATIVE_ATTR_RE = re.compile(
+    r'(?P<quote>["\'])/(?P<path>(?!/)[^"\']+)(?P=quote)')
 ASSIST_TEXT_CONTENT_TYPES = (
     'text/html',
 )
@@ -85,11 +87,13 @@ def _serialize_content_value(
 
     storage_key = payload.get('storage_key')
     if not storage_key:
-        storage_key = _extract_storage_key_from_download_url(payload.get('download_url'))
+        storage_key = _extract_storage_key_from_download_url(
+            payload.get('download_url'))
 
     duration_ms_raw = payload.get('duration_ms')
     try:
-        duration_ms = int(duration_ms_raw) if duration_ms_raw is not None else None
+        duration_ms = int(
+            duration_ms_raw) if duration_ms_raw is not None else None
     except (TypeError, ValueError):
         duration_ms = None
 
@@ -121,7 +125,8 @@ def _serialize_content_value(
 
 
 def _serialize_message(message, own_participant_id: int) -> ChatMessageResponse:
-    content, content_type, attachment, storage_key, attachment_group_id = _serialize_content_value(message.content)
+    content, content_type, attachment, storage_key, attachment_group_id = _serialize_content_value(
+        message.content)
     if attachment is not None:
         attachment.download_url = _resolve_attachment_download_url(
             chat_id=message.chat_id,
@@ -271,7 +276,8 @@ def _is_allowed_assist_host(host: str | None) -> bool:
     host_lower = host.strip().lower()
     if not host_lower:
         return False
-    allowed_hosts = _parse_assist_allowed_hosts(back_settings.YOUTUBE_ASSIST_PROXY_ALLOWED_HOSTS)
+    allowed_hosts = _parse_assist_allowed_hosts(
+        back_settings.YOUTUBE_ASSIST_PROXY_ALLOWED_HOSTS)
     return any(host_lower == allowed or host_lower.endswith(f'.{allowed}') for allowed in allowed_hosts)
 
 
@@ -297,115 +303,6 @@ def _ensure_assisted_enabled_for_user(user: AuthUserDep) -> None:
             status_code=403,
             detail='Assisted transport is available only when assisted mode is enabled',
         )
-
-
-def _rewrite_assist_proxy_text_payload(payload_text: str, *, base_url: str) -> str:
-    if '/api/youtube/assist/tunnel?url=' in payload_text:
-        # Already rewritten response chunk.
-        return payload_text
-
-    def replace_absolute_url(match: re.Match[str]) -> str:
-        candidate_url = match.group(0)
-        try:
-            parsed = urlparse(candidate_url)
-        except ValueError:
-            return candidate_url
-        if not _is_allowed_assist_host(parsed.hostname):
-            return candidate_url
-        return _build_assist_tunnel_url(candidate_url)
-
-    rewritten = ABSOLUTE_URL_RE.sub(replace_absolute_url, payload_text)
-
-    def replace_protocol_relative_url(match: re.Match[str]) -> str:
-        prefix = match.group('prefix')
-        host = (match.group('host') or '').lower()
-        path = match.group('path') or ''
-        if not _is_allowed_assist_host(host):
-            return match.group(0)
-        absolute = f'https://{host}{path}'
-        return f'{prefix}{_build_assist_tunnel_url(absolute)}'
-
-    rewritten = PROTOCOL_RELATIVE_URL_RE.sub(replace_protocol_relative_url, rewritten)
-
-    def replace_root_relative_attr(match: re.Match[str]) -> str:
-        quoted_path = match.group('path')
-        quote_char = match.group('quote')
-        absolute = urljoin(base_url, f'/{quoted_path}')
-        try:
-            parsed = urlparse(absolute)
-        except ValueError:
-            return match.group(0)
-        if not _is_allowed_assist_host(parsed.hostname):
-            return match.group(0)
-        return f'{quote_char}{_build_assist_tunnel_url(absolute)}{quote_char}'
-
-    rewritten = ROOT_RELATIVE_ATTR_RE.sub(replace_root_relative_attr, rewritten)
-    if 'window.__spAssistProxyPatched' in rewritten:
-        return rewritten
-
-    assist_hosts = _parse_assist_allowed_hosts(back_settings.YOUTUBE_ASSIST_PROXY_ALLOWED_HOSTS)
-    hosts_js = ','.join(f'"{host}"' for host in assist_hosts)
-    bootstrap_script = f"""
-<script>
-(function() {{
-  if (window.__spAssistProxyPatched) return;
-  window.__spAssistProxyPatched = true;
-  const allowedHosts = [{hosts_js}];
-  const tunnelPrefix = '/api/youtube/assist/tunnel?url=';
-  function isAllowedHost(hostname) {{
-    if (!hostname) return false;
-    const host = String(hostname).toLowerCase();
-    return allowedHosts.some((allowed) => host === allowed || host.endsWith('.' + allowed));
-  }}
-  function toAbsoluteUrl(value) {{
-    if (typeof value !== 'string' || !value) return null;
-    if (value.startsWith(tunnelPrefix) || value.startsWith('data:') || value.startsWith('blob:')) return null;
-    if (value.startsWith('//')) return 'https:' + value;
-    if (value.startsWith('/')) return 'https://www.youtube.com' + value;
-    try {{
-      const parsed = new URL(value, window.location.origin);
-      return parsed.href;
-    }} catch (_err) {{
-      return null;
-    }}
-  }}
-  function rewriteUrl(value) {{
-    const absolute = toAbsoluteUrl(value);
-    if (!absolute) return value;
-    try {{
-      const parsed = new URL(absolute);
-      if (!isAllowedHost(parsed.hostname)) return value;
-      return tunnelPrefix + encodeURIComponent(parsed.href);
-    }} catch (_err) {{
-      return value;
-    }}
-  }}
-  const originalFetch = window.fetch;
-  window.fetch = function(input, init) {{
-    if (typeof input === 'string') {{
-      return originalFetch.call(this, rewriteUrl(input), init);
-    }}
-    if (input && typeof input.url === 'string') {{
-      const nextUrl = rewriteUrl(input.url);
-      if (nextUrl !== input.url) {{
-        const req = new Request(nextUrl, input);
-        return originalFetch.call(this, req, init);
-      }}
-    }}
-    return originalFetch.call(this, input, init);
-  }};
-  const originalOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url) {{
-    return originalOpen.apply(this, [method, rewriteUrl(url), ...Array.prototype.slice.call(arguments, 2)]);
-  }};
-}})();
-</script>
-"""
-    if '</head>' in rewritten:
-        rewritten = rewritten.replace('</head>', f'{bootstrap_script}</head>', 1)
-    else:
-        rewritten = f'{bootstrap_script}{rewritten}'
-    return rewritten
 
 
 def _is_forbidden_preview_host(host: str) -> bool:
@@ -473,7 +370,8 @@ def _resolve_chat_last_message_preview(last_message: str | None) -> str | None:
     if last_message is None:
         return None
 
-    caption, content_type, attachment, _, _ = _serialize_content_value(last_message)
+    caption, content_type, attachment, _, _ = _serialize_content_value(
+        last_message)
     if attachment is None:
         return last_message
 
@@ -564,7 +462,8 @@ def _serialize_live_location_share(share) -> dict:
 
 def _serialize_expense(expense) -> ExpenseResponse:
     shares = [
-        ExpenseParticipantShareResponse(user_id=user_id, share_minor=share_minor)
+        ExpenseParticipantShareResponse(
+            user_id=user_id, share_minor=share_minor)
         for user_id, share_minor in sorted(expense.shares_minor_by_user_id.items())
     ]
     return ExpenseResponse(
@@ -643,7 +542,8 @@ async def get_chats(
     chats = chat_repo.find_all(user_id=user.id)
     return [
         chat.model_copy(
-            update={'last_message': _resolve_chat_last_message_preview(chat.last_message)},
+            update={'last_message': _resolve_chat_last_message_preview(
+                chat.last_message)},
         )
         for chat in chats
     ]
@@ -658,7 +558,8 @@ async def get_chat_participants(
 ) -> list[AvailableUser]:
     messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
     participants = messenger.get_chat_participants(chat_id=chat_id)
-    users = {registered_user.id: registered_user for registered_user in user_repo.find_all()}
+    users = {
+        registered_user.id: registered_user for registered_user in user_repo.find_all()}
     result: list[AvailableUser] = []
     for participant in participants:
         participant_user = users.get(participant.user_id)
@@ -684,8 +585,10 @@ async def create_chat_expense(
 ) -> ExpenseResponse:
     messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
     for participant_user_id in payload.participant_user_ids:
-        messenger.get_chat_participant(chat_id=chat_id, user_id=participant_user_id)
-    messenger.get_chat_participant(chat_id=chat_id, user_id=payload.payer_user_id)
+        messenger.get_chat_participant(
+            chat_id=chat_id, user_id=participant_user_id)
+    messenger.get_chat_participant(
+        chat_id=chat_id, user_id=payload.payer_user_id)
 
     shares_minor_by_user_id: dict[int, int] | None = None
     if payload.shares_minor is not None:
@@ -759,7 +662,8 @@ async def mark_chat_expense_settlement_paid(
     payload: ExpenseMarkPaidRequest = Body(),
 ) -> ExpenseOverviewResponse:
     messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
-    messenger.get_chat_participant(chat_id=chat_id, user_id=payload.from_user_id)
+    messenger.get_chat_participant(
+        chat_id=chat_id, user_id=payload.from_user_id)
     messenger.get_chat_participant(chat_id=chat_id, user_id=payload.to_user_id)
     try:
         expenses.mark_settlement_paid(
@@ -804,7 +708,8 @@ async def get_link_preview(
     parsed = urlparse(normalized_url)
     host = parsed.hostname or ''
     if _is_forbidden_preview_host(host):
-        raise HTTPException(status_code=400, detail='Preview is not allowed for this host')
+        raise HTTPException(
+            status_code=400, detail='Preview is not allowed for this host')
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
@@ -814,7 +719,8 @@ async def get_link_preview(
             )
             response.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=400, detail='Failed to fetch URL preview') from exc
+        raise HTTPException(
+            status_code=400, detail='Failed to fetch URL preview') from exc
 
     html_text = response.text[:300000]
     youtube_video_id = _extract_youtube_video_id(str(response.url))
@@ -833,7 +739,8 @@ async def get_link_preview(
         _extract_meta_value(html_text, 'property', 'og:image') or
         _extract_meta_value(html_text, 'name', 'twitter:image')
     )
-    site_name = _extract_meta_value(html_text, 'property', 'og:site_name') or host
+    site_name = _extract_meta_value(
+        html_text, 'property', 'og:site_name') or host
 
     return LinkPreviewResponse(
         url=str(response.url),
@@ -882,11 +789,13 @@ async def tunnel_youtube_assist_resource(
     try:
         parsed_url = urlparse(normalized_url)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail='Invalid URL format') from exc
+        raise HTTPException(
+            status_code=400, detail='Invalid URL format') from exc
     if not parsed_url.hostname:
         raise HTTPException(status_code=400, detail='Invalid URL host')
     if not _is_allowed_assist_host(parsed_url.hostname):
-        raise HTTPException(status_code=403, detail='Host is not allowed for assisted tunnel')
+        raise HTTPException(
+            status_code=403, detail='Host is not allowed for assisted tunnel')
 
     request_headers: dict[str, str] = {
         'User-Agent': request.headers.get('user-agent', 'spmessenger-youtube-assist/1.0'),
@@ -926,9 +835,11 @@ async def tunnel_youtube_assist_resource(
         upstream_response = await client.send(request_obj, stream=True)
     except httpx.HTTPError as exc:
         await client.aclose()
-        raise HTTPException(status_code=502, detail='Failed to fetch upstream resource') from exc
+        raise HTTPException(
+            status_code=502, detail='Failed to fetch upstream resource') from exc
 
-    upstream_content_type = upstream_response.headers.get('content-type', 'application/octet-stream')
+    upstream_content_type = upstream_response.headers.get(
+        'content-type', 'application/octet-stream')
     forwarded_headers: dict[str, str] = {}
     for header_name in ('cache-control', 'etag', 'last-modified', 'accept-ranges', 'content-range'):
         header_value = upstream_response.headers.get(header_name)
@@ -942,7 +853,8 @@ async def tunnel_youtube_assist_resource(
         payload_bytes = await upstream_response.aread()
         await upstream_response.aclose()
         await client.aclose()
-        source_text = payload_bytes.decode(upstream_response.encoding or 'utf-8', errors='ignore')
+        source_text = payload_bytes.decode(
+            upstream_response.encoding or 'utf-8', errors='ignore')
         rewritten_text = _rewrite_assist_proxy_text_payload(
             source_text,
             base_url=str(upstream_response.url),
@@ -1068,7 +980,8 @@ async def _emit_live_location_stopped_message(
     share,
 ) -> None:
     ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
-    connected_user_ids = ws_manager.get_connected_user_ids_for_chat(share.chat_id)
+    connected_user_ids = ws_manager.get_connected_user_ids_for_chat(
+        share.chat_id)
     sent_message = messenger.send_message(
         chat_id=share.chat_id,
         sender_id=share.user_id,
@@ -1077,7 +990,8 @@ async def _emit_live_location_stopped_message(
     )
     participants = messenger.get_chat_participants(chat_id=share.chat_id)
     for participant in participants:
-        serialized_message = _serialize_message(sent_message, participant.id).model_dump()
+        serialized_message = _serialize_message(
+            sent_message, participant.id).model_dump()
         await ws_manager.send_to_user(
             user_id=participant.user_id,
             payload={
@@ -1120,6 +1034,16 @@ async def create_watch_room(
     return _serialize_watch_room(room, youtube_access_mode=access_context.youtube_access_mode)
 
 
+@router.get('/watch-rooms')
+async def get_watch_room_id(
+    user: AuthUserDep,
+    chat_id: int,
+    message_id: int,
+):
+    # room_id = id_by_pair(chat_id, message_id)
+    ...
+
+
 @router.get('/watch-rooms/by-chat/{chat_id}')
 async def get_watch_room_by_chat(
     chat_id: int,
@@ -1129,7 +1053,8 @@ async def get_watch_room_by_chat(
     watch_rooms: WatchRoomServiceDep,
 ) -> WatchRoomResponse:
     messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
-    room = watch_rooms.find_room(chat_id=chat_id, youtube_video_id=youtube_video_id)
+    room = watch_rooms.find_room(
+        chat_id=chat_id, youtube_video_id=youtube_video_id)
     if room is None:
         raise HTTPException(status_code=404, detail='Room not found')
     access_context = resolve_youtube_access_context_for_user(
@@ -1257,11 +1182,14 @@ async def invite_to_watch_room(
     room = watch_rooms.get_room(room_id)
     messenger.get_chat_participant(chat_id=room.chat_id, user_id=user.id)
     if payload.target_chat_id is not None:
-        messenger.get_chat_participant(chat_id=payload.target_chat_id, user_id=user.id)
+        messenger.get_chat_participant(
+            chat_id=payload.target_chat_id, user_id=user.id)
         try:
-            messenger.get_chat_participant(chat_id=payload.target_chat_id, user_id=payload.target_user_id)
+            messenger.get_chat_participant(
+                chat_id=payload.target_chat_id, user_id=payload.target_user_id)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail='Target user is not in target chat') from exc
+            raise HTTPException(
+                status_code=400, detail='Target user is not in target chat') from exc
 
     invite = watch_rooms.create_invite(
         room_id=room_id,
@@ -1406,7 +1334,8 @@ async def get_chat_messages(
     user: AuthUserDep,
     messenger: MessengerServiceDep,
 ) -> list[ChatMessageResponse]:
-    participant, messages = messenger.get_chat_messages(chat_id=chat_id, user_id=user.id)
+    participant, messages = messenger.get_chat_messages(
+        chat_id=chat_id, user_id=user.id)
     return [_serialize_message(message, participant.id) for message in messages]
 
 
@@ -1450,7 +1379,8 @@ async def upload_chat_attachment(
         raise HTTPException(status_code=404, detail='Attachment not found')
 
     if f'chat-attachments/{chat_id}/' not in record.storage_key:
-        raise HTTPException(status_code=403, detail='Attachment does not belong to chat')
+        raise HTTPException(
+            status_code=403, detail='Attachment does not belong to chat')
 
     body = await request.body()
     try:
@@ -1486,7 +1416,8 @@ async def complete_chat_attachment(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if f'chat-attachments/{chat_id}/' not in record.storage_key:
-        raise HTTPException(status_code=403, detail='Attachment does not belong to chat')
+        raise HTTPException(
+            status_code=403, detail='Attachment does not belong to chat')
 
     return AttachmentCompleteResponse(
         attachment_id=record.attachment_id,
@@ -1512,7 +1443,8 @@ async def get_chat_attachment_download_url(
         raise HTTPException(status_code=404, detail='Attachment not found')
 
     if f'chat-attachments/{chat_id}/' not in record.storage_key:
-        raise HTTPException(status_code=403, detail='Attachment does not belong to chat')
+        raise HTTPException(
+            status_code=403, detail='Attachment does not belong to chat')
 
     url = _resolve_attachment_download_url(
         chat_id=chat_id,
@@ -1537,7 +1469,8 @@ async def get_chat_attachment_content(
     record = storage.get_attachment_record(attachment_id)
     if record is not None:
         if f'chat-attachments/{chat_id}/' not in record.storage_key:
-            raise HTTPException(status_code=403, detail='Attachment does not belong to chat')
+            raise HTTPException(
+                status_code=403, detail='Attachment does not belong to chat')
         if record.local_path is not None:
             return FileResponse(
                 path=record.local_path,
@@ -1545,16 +1478,19 @@ async def get_chat_attachment_content(
                 filename=record.original_name,
             )
 
-        presigned_url = storage.generate_attachment_download_url(storage_key=record.storage_key)
+        presigned_url = storage.generate_attachment_download_url(
+            storage_key=record.storage_key)
         return RedirectResponse(url=presigned_url, status_code=307)
 
     if key is None:
         raise HTTPException(status_code=404, detail='Attachment not found')
     resolved_key = unquote(key)
     if not resolved_key.startswith(f'chat-attachments/{chat_id}/'):
-        raise HTTPException(status_code=403, detail='Attachment does not belong to chat')
+        raise HTTPException(
+            status_code=403, detail='Attachment does not belong to chat')
 
-    presigned_url = storage.generate_attachment_download_url(storage_key=resolved_key)
+    presigned_url = storage.generate_attachment_download_url(
+        storage_key=resolved_key)
     return RedirectResponse(url=presigned_url, status_code=307)
 
 
@@ -1567,16 +1503,19 @@ async def send_chat_message(
     storage: StorageServiceDep,
     payload: SendMessageRequest = Body(),
 ) -> ChatMessageResponse:
-    participant = messenger.get_chat_participant(chat_id=chat_id, user_id=user.id)
+    participant = messenger.get_chat_participant(
+        chat_id=chat_id, user_id=user.id)
     content = payload.content
     if payload.attachment_id is not None:
         record = storage.get_attachment_record(payload.attachment_id)
         if record is None:
             raise HTTPException(status_code=400, detail='Attachment not found')
         if record.status != 'ready':
-            raise HTTPException(status_code=400, detail='Attachment is not ready')
+            raise HTTPException(
+                status_code=400, detail='Attachment is not ready')
         if f'chat-attachments/{chat_id}/' not in record.storage_key:
-            raise HTTPException(status_code=403, detail='Attachment does not belong to chat')
+            raise HTTPException(
+                status_code=403, detail='Attachment does not belong to chat')
 
         download_url = _resolve_attachment_download_url(
             chat_id=chat_id,
@@ -1601,7 +1540,8 @@ async def send_chat_message(
 
     try:
         ws_manager: WebSocketConnectionManager = request.app.state.ws_manager
-        connected_user_ids = ws_manager.get_connected_user_ids_for_chat(chat_id)
+        connected_user_ids = ws_manager.get_connected_user_ids_for_chat(
+            chat_id)
         message = messenger.send_message(
             chat_id,
             user.id,
@@ -1668,7 +1608,8 @@ async def chats_socket(
     watch_rooms: WatchRoomServiceDep,
     live_locations: LiveLocationServiceDep,
 ):
-    access_token = websocket.cookies.get('access_token')
+    access_token = websocket.cookies.get(
+        'access_token') or websocket.query_params.get('access_token')
     try:
         user = get_current_user_by_token(
             repo=user_repo,
@@ -1733,7 +1674,8 @@ async def chats_socket(
                             'has_more': has_more,
                             'request_before_message_id': request.before_message_id,
                             'messages': [
-                                _serialize_message(message, participant.id).model_dump()
+                                _serialize_message(
+                                    message, participant.id).model_dump()
                                 for message in messages
                             ],
                         }
@@ -1776,7 +1718,8 @@ async def chats_socket(
                     continue
 
                 if request.action == 'live_location_start':
-                    messenger.get_chat_participant(chat_id=request.chat_id, user_id=user.id)
+                    messenger.get_chat_participant(
+                        chat_id=request.chat_id, user_id=user.id)
                     share = live_locations.upsert_share(
                         chat_id=request.chat_id,
                         user_id=user.id,
@@ -1795,7 +1738,8 @@ async def chats_socket(
                     continue
 
                 if request.action == 'live_location_update':
-                    messenger.get_chat_participant(chat_id=request.chat_id, user_id=user.id)
+                    messenger.get_chat_participant(
+                        chat_id=request.chat_id, user_id=user.id)
                     share = live_locations.update_share(
                         chat_id=request.chat_id,
                         user_id=user.id,
@@ -1811,8 +1755,10 @@ async def chats_socket(
                     continue
 
                 if request.action == 'live_location_stop':
-                    messenger.get_chat_participant(chat_id=request.chat_id, user_id=user.id)
-                    stopped_share = live_locations.stop_share(chat_id=request.chat_id, user_id=user.id)
+                    messenger.get_chat_participant(
+                        chat_id=request.chat_id, user_id=user.id)
+                    stopped_share = live_locations.stop_share(
+                        chat_id=request.chat_id, user_id=user.id)
                     if stopped_share is not None:
                         await _broadcast_live_location_stopped(
                             request=websocket,
@@ -1827,7 +1773,8 @@ async def chats_socket(
                         )
                     continue
 
-                connected_user_ids = ws_manager.get_connected_user_ids_for_chat(request.chat_id)
+                connected_user_ids = ws_manager.get_connected_user_ids_for_chat(
+                    request.chat_id)
                 sent_message = messenger.send_message(
                     chat_id=request.chat_id,
                     sender_id=user.id,
@@ -1852,7 +1799,8 @@ async def chats_socket(
                     }
                 )
 
-                participants = messenger.get_chat_participants(chat_id=request.chat_id)
+                participants = messenger.get_chat_participants(
+                    chat_id=request.chat_id)
                 for participant in participants:
                     if participant.user_id == user.id:
                         continue
@@ -1900,4 +1848,3 @@ async def chats_socket(
                     messenger=messenger,
                     room=room,
                 )
-
